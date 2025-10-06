@@ -1,10 +1,12 @@
 {
   "domain": "intersvyaz",
   "name": "Intersvyaz Doorphone",
-  "version": "0.1.0",
-  "documentation": "https://example.com/docs/intersvyaz",
+  "version": "0.1.1",
+  "documentation": "https://github.com/your-github-username/homeassistant-is#readme",
+  "issue_tracker": "https://github.com/your-github-username/homeassistant-is/issues",
   "requirements": [],
   "codeowners": ["@your-github-username"],
   "config_flow": true,
+  "integration_type": "service",
   "iot_class": "cloud_polling"
 }
