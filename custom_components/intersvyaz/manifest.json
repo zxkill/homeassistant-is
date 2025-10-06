@@ -1,0 +1,10 @@
+{
+  "domain": "intersvyaz",
+  "name": "Intersvyaz Doorphone",
+  "version": "0.1.0",
+  "documentation": "https://example.com/docs/intersvyaz",
+  "requirements": [],
+  "codeowners": ["@your-github-username"],
+  "config_flow": true,
+  "iot_class": "cloud_polling"
+}
