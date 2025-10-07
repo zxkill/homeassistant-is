@@ -6,8 +6,15 @@ DATA_API_CLIENT = "api_client"
 DATA_CONFIG = "config"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
-DEFAULT_API_BASE_URL = "https://api.intersvyaz.example.com"
-SEND_PHONE_ENDPOINT = "/auth/phone"
+DEFAULT_API_BASE_URL = "https://api.is74.ru"
+SEND_PHONE_ENDPOINT = "/mobile/auth/get-confirm"
+
+#{
+    #'checkSkipAuth': 1,
+    #'phone': '9080485745',
+    #'deviceId': '60113CFC-044B-435C-9679-BB89A2EE3DBA'
+#}
+
 CONFIRM_CODE_ENDPOINT = "/auth/code"
 REFRESH_TOKEN_ENDPOINT = "/auth/refresh"
 OPEN_DOOR_ENDPOINT = "/door/open"

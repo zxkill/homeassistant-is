@@ -88,7 +88,7 @@ class IntersvyazApiClient:
     async def async_send_phone_number(self, phone_number: str) -> None:
         """Отправить номер телефона для начала процедуры авторизации."""
 
-        payload = {"phone": phone_number}
+        payload = {"phone": phone_number, "deviceId": "60113CFC-044B-435C-9679-BB89A2EE3DBA", "checkSkipAuth": 1}
         _LOGGER.info("Отправка номера телефона %s для авторизации", phone_number)
         await self._request("POST", SEND_PHONE_ENDPOINT, json=payload)
 
