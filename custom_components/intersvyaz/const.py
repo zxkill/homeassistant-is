@@ -18,6 +18,7 @@ GET_TOKEN_ENDPOINT = "/mobile/auth/get-token"
 USER_INFO_ENDPOINT = "/user/user"
 BALANCE_ENDPOINT = "/user/balance"
 TOKEN_INFO_ENDPOINT = "/token/info"
+RELAYS_ENDPOINT = "/domofon/relays"
 
 # Конечные точки CRM
 CRM_AUTH_ENDPOINT = "/api/auth-lk"
@@ -52,6 +53,13 @@ CONF_CRM_ACCESS_END = "crm_access_end"
 CONF_BUYER_ID = "buyer_id"
 CONF_DOOR_MAC = "door_mac"
 CONF_DOOR_ENTRANCE = "door_entrance"
+CONF_RELAY_ID = "relay_id"
+CONF_RELAY_NUM = "relay_num"
+CONF_RELAY_PAYLOAD = "relay_payload"
+CONF_DOOR_ADDRESS = "door_address"
+CONF_DOOR_HAS_VIDEO = "door_has_video"
+CONF_DOOR_IMAGE_URL = "door_image_url"
+CONF_ENTRANCE_UID = "entrance_uid"
 
 # Заголовки
 HEADER_AUTHORIZATION = "Authorization"

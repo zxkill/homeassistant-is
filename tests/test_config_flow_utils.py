@@ -66,9 +66,9 @@ CONFIG_FLOW_MODULE = _load_module("custom_components.intersvyaz.config_flow", "c
 def test_normalize_message() -> None:
     """HTML сообщения преобразуются в читабельный текст."""
 
-    raw = "Сейчас на номер<br>+7 (908) 048-57-43 позвонят.<br>Введите код"
+    raw = "Сейчас на номер<br>+7 (900) 111-22-33 позвонят.<br>Введите код"
     normalized = CONFIG_FLOW_MODULE._normalize_message(raw)
-    assert normalized == "Сейчас на номер\n+7 (908) 048-57-43 позвонят.\nВведите код"
+    assert normalized == "Сейчас на номер\n+7 (900) 111-22-33 позвонят.\nВведите код"
 
 
 def test_validate_mac() -> None:
@@ -90,15 +90,54 @@ def test_build_description_placeholders() -> None:
     assert "Неверный код подтверждения" in placeholders["auth_message"]
 
 
-def test_build_options_placeholders() -> None:
-    """Плейсхолдеры шага домофона содержат адреса и ошибки."""
+def test_select_preferred_relay() -> None:
+    """Выбор домофона отдаёт приоритет основному входу."""
 
-    flow = CONFIG_FLOW_MODULE.IntersvyazConfigFlow()
-    flow._addresses = [
-        CONFIG_FLOW_MODULE.ConfirmAddress("1", "Адрес 1"),
-        CONFIG_FLOW_MODULE.ConfirmAddress("2", "Адрес 2"),
-    ]
-    flow._last_error_message = "Ошибка авторизации"
-    placeholders = flow._build_options_placeholders()
-    assert "Адрес 1" in placeholders["addresses"]
-    assert "Ошибка авторизации" in placeholders["error_message"]
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    main_relay = RelayInfo(
+        address="Основной вход",
+        relay_id="1",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    secondary_relay = RelayInfo(
+        address="Ворота",
+        relay_id="2",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7B",
+        status_text="OK",
+        is_main=False,
+        has_video=False,
+        entrance_uid=None,
+        porch_num="2",
+        relay_type="Ворота",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+
+    selected = CONFIG_FLOW_MODULE._select_preferred_relay(
+        [secondary_relay, main_relay]
+    )
+    assert selected is main_relay

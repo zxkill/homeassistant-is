@@ -20,6 +20,7 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DOOR_ENTRANCE,
     CONF_DOOR_MAC,
+    CONF_RELAY_NUM,
     CONF_MOBILE_TOKEN,
     DATA_API_CLIENT,
     DATA_CONFIG,
@@ -63,7 +64,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     async def _async_open_door() -> None:
         mac = config_data[CONF_DOOR_MAC]
-        door_id = int(config_data[CONF_DOOR_ENTRANCE])
+        door_id = int(config_data.get(CONF_RELAY_NUM, config_data[CONF_DOOR_ENTRANCE]))
         _LOGGER.info(
             "Выполняем команду открытия домофона для entry_id=%s",
             entry.entry_id,

@@ -21,15 +21,6 @@
         "data": {
           "user_id": "Contract"
         }
-      },
-      "account_options": {
-        "title": "Doorphone settings",
-        "description": "Provide the doorphone parameters and buyer identifier.\n{addresses}\n{error_message}",
-        "data": {
-          "door_mac": "Doorphone MAC address",
-          "door_entrance": "Entrance number",
-          "buyer_id": "Buyer identifier"
-        }
       }
     },
     "error": {
@@ -38,7 +29,9 @@
       "no_addresses": "No contracts were found for the specified phone number.",
       "token_request_failed": "Failed to obtain an access token. Please try again.",
       "crm_auth_failed": "Failed to authorize in the secondary system.",
-      "invalid_mac": "Please enter a MAC address in the format XX:XX:XX:XX:XX:XX."
+      "relay_fetch_failed": "Failed to fetch the available doorphones. Please try again later.",
+      "relay_not_found": "No controllable doorphones were found for the selected contract.",
+      "relay_data_invalid": "The server returned invalid doorphone data. Try selecting another address."
     }
   }
 }

@@ -17,6 +17,7 @@ from .api import (
     IntersvyazApiClient,
     IntersvyazApiError,
     MobileToken,
+    RelayInfo,
     generate_device_id,
 )
 from .const import (
@@ -27,12 +28,19 @@ from .const import (
     CONF_DEVICE_ID,
     CONF_DOOR_ENTRANCE,
     CONF_DOOR_MAC,
+    CONF_DOOR_ADDRESS,
+    CONF_DOOR_HAS_VIDEO,
+    CONF_DOOR_IMAGE_URL,
     CONF_MOBILE_ACCESS_BEGIN,
     CONF_MOBILE_ACCESS_END,
     CONF_MOBILE_TOKEN,
     CONF_PHONE_NUMBER,
     CONF_PROFILE_ID,
     CONF_USER_ID,
+    CONF_RELAY_ID,
+    CONF_RELAY_NUM,
+    CONF_RELAY_PAYLOAD,
+    CONF_ENTRANCE_UID,
     DEFAULT_BUYER_ID,
     DOMAIN,
 )
@@ -61,6 +69,12 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._buyer_id: int = DEFAULT_BUYER_ID
         self._door_mac: Optional[str] = None
         self._door_entrance: Optional[int] = None
+        self._door_address: Optional[str] = None
+        self._door_has_video: Optional[bool] = None
+        self._door_image_url: Optional[str] = None
+        self._entrance_uid: Optional[str] = None
+        self._relay_payload: Optional[Dict[str, Any]] = None
+        self._selected_relay: Optional[RelayInfo] = None
         self._crm_token_payload: Optional[Dict[str, Any]] = None
         self._last_error_message: Optional[str] = None
 
@@ -151,53 +165,6 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         return self._show_select_account_form()
 
-    async def async_step_account_options(
-        self, user_input: Optional[Dict[str, Any]] = None
-    ) -> FlowResult:
-        """Собрать параметры домофона и выполнить вторичную авторизацию."""
-
-        errors: Dict[str, str] = {}
-
-        if user_input is not None:
-            mac = user_input[CONF_DOOR_MAC].strip()
-            if not _validate_mac(mac):
-                errors[CONF_DOOR_MAC] = "invalid_mac"
-            else:
-                entrance = int(user_input[CONF_DOOR_ENTRANCE])
-                buyer_id = int(user_input[CONF_BUYER_ID])
-                self._door_mac = mac.upper()
-                self._door_entrance = entrance
-                self._buyer_id = buyer_id
-                try:
-                    assert self._api_client is not None
-                    self._api_client.set_buyer_id(buyer_id)
-                    crm_token = await self._api_client.async_authenticate_crm(buyer_id)
-                except IntersvyazApiError as err:
-                    _LOGGER.error("Ошибка при авторизации во второй системе: %s", err)
-                    errors["base"] = "crm_auth_failed"
-                    self._last_error_message = str(err)
-                else:
-                    self._crm_token_payload = crm_token.raw
-                    self._last_error_message = None
-                    return self._create_entry()
-
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_DOOR_MAC, default=self._door_mac or ""):
-                    vol.All(str, vol.Length(min=11)),
-                vol.Required(CONF_DOOR_ENTRANCE, default=self._door_entrance or 1):
-                    vol.All(int, vol.Range(min=0)),
-                vol.Required(CONF_BUYER_ID, default=self._buyer_id):
-                    vol.All(int, vol.Range(min=1)),
-            }
-        )
-        return self.async_show_form(
-            step_id="account_options",
-            data_schema=schema,
-            errors=errors,
-            description_placeholders=self._build_options_placeholders(),
-        )
-
     async def _handle_address_selection(self, user_id: str) -> FlowResult:
         """Получить мобильный токен после выбора договора."""
 
@@ -214,7 +181,89 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._device_id = token.unique_device_id
         await self.async_set_unique_id(str(token.user_id), raise_on_progress=False)
         self._last_error_message = None
-        return await self.async_step_account_options()
+        return await self._finalize_configuration()
+
+    async def _finalize_configuration(self) -> FlowResult:
+        """Получить сведения о домофоне и выполнить CRM авторизацию."""
+
+        assert self._api_client is not None
+        assert self._mobile_token is not None
+
+        try:
+            relays = await self._api_client.async_get_relays()
+        except IntersvyazApiError as err:
+            _LOGGER.error("Не удалось получить список домофонов: %s", err)
+            self._last_error_message = str(err)
+            return self._show_select_account_form(errors={"base": "relay_fetch_failed"})
+
+        if not relays:
+            _LOGGER.error("API не вернуло ни одного домофона для пользователя")
+            self._last_error_message = None
+            return self._show_select_account_form(errors={"base": "relay_not_found"})
+
+        relay = _select_preferred_relay(relays)
+        if not relay:
+            _LOGGER.error("Не удалось выбрать подходящий домофон из списка")
+            self._last_error_message = None
+            return self._show_select_account_form(errors={"base": "relay_not_found"})
+
+        # Сервер может вернуть MAC либо в основном блоке, либо вложенным в `OPENER`.
+        mac = (relay.mac or (relay.opener.mac if relay.opener else None) or "").strip()
+        if not _validate_mac(mac):
+            _LOGGER.error("Получен некорректный MAC-адрес домофона: %s", mac)
+            self._last_error_message = None
+            return self._show_select_account_form(errors={"base": "relay_data_invalid"})
+
+        # Для CRM используется номер реле, однако в отдельных ответах он совпадает с номером подъезда.
+        relay_num = (
+            relay.opener.relay_num if relay.opener and relay.opener.relay_num is not None else None
+        )
+        if relay_num is None and relay.porch_num:
+            try:
+                relay_num = int(relay.porch_num)
+            except ValueError:
+                relay_num = None
+        if relay_num is None:
+            relay_num = 1
+
+        self._door_mac = mac.upper()
+        self._door_entrance = int(relay_num)
+        self._door_address = relay.address or None
+        self._door_has_video = relay.has_video
+        self._door_image_url = relay.image_url
+        self._entrance_uid = relay.entrance_uid
+        self._relay_payload = relay.to_dict()
+        self._selected_relay = relay
+
+        # В некоторых городах `RELAY_ID` совпадает с buyerId, поэтому пробуем использовать его,
+        # а в качестве безопасного значения подставляем profile_id из мобильного токена.
+        if relay.relay_id:
+            try:
+                self._buyer_id = int(relay.relay_id)
+            except ValueError:
+                self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
+        else:
+            self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
+
+        _LOGGER.info(
+            "Выбран домофон %s (mac=%s, relay_num=%s, buyer_id=%s)",
+            relay.address,
+            self._door_mac,
+            relay_num,
+            self._buyer_id,
+        )
+
+        try:
+            self._api_client.set_buyer_id(self._buyer_id)
+            crm_token = await self._api_client.async_authenticate_crm(self._buyer_id)
+        except IntersvyazApiError as err:
+            _LOGGER.error("Ошибка при авторизации во второй системе: %s", err)
+            self._last_error_message = str(err)
+            return self._show_select_account_form(errors={"base": "crm_auth_failed"})
+
+        self._crm_token_payload = crm_token.raw
+        self._last_error_message = None
+        return self._create_entry()
 
     @callback
     def _create_entry(self) -> FlowResult:
@@ -244,6 +293,21 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             CONF_CRM_ACCESS_BEGIN: crm_access_begin,
             CONF_CRM_ACCESS_END: crm_access_end,
         }
+        if self._selected_relay and self._selected_relay.relay_id:
+            data[CONF_RELAY_ID] = self._selected_relay.relay_id
+        if self._selected_relay and self._selected_relay.opener:
+            if self._selected_relay.opener.relay_num is not None:
+                data[CONF_RELAY_NUM] = self._selected_relay.opener.relay_num
+        if self._relay_payload:
+            data[CONF_RELAY_PAYLOAD] = self._relay_payload
+        if self._door_address:
+            data[CONF_DOOR_ADDRESS] = self._door_address
+        if self._door_has_video is not None:
+            data[CONF_DOOR_HAS_VIDEO] = self._door_has_video
+        if self._door_image_url:
+            data[CONF_DOOR_IMAGE_URL] = self._door_image_url
+        if self._entrance_uid:
+            data[CONF_ENTRANCE_UID] = self._entrance_uid
         _LOGGER.debug("Создаём конфигурацию с данными: %s", data)
         return self.async_create_entry(title=self._phone_number, data=data)
 
@@ -254,17 +318,6 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self._last_error_message:
             message = f"{message}\n\n{self._last_error_message}"
         return {"auth_message": message}
-
-    def _build_options_placeholders(self) -> Dict[str, str]:
-        """Подсказки для шага выбора домофона."""
-
-        placeholders: Dict[str, str] = {}
-        if self._addresses:
-            addresses = "\n".join(address.address for address in self._addresses)
-            placeholders["addresses"] = addresses
-        if self._last_error_message:
-            placeholders["error_message"] = self._last_error_message
-        return placeholders
 
     def _show_select_account_form(
         self, errors: Optional[Dict[str, str]] = None
@@ -305,6 +358,17 @@ def _normalize_message(message: Optional[str]) -> Optional[str]:
     normalized = unescape(normalized)
     normalized = re.sub(r"<[^>]+>", "", normalized)
     return normalized.strip() or None
+
+
+def _select_preferred_relay(relays: List[RelayInfo]) -> Optional[RelayInfo]:
+    """Выбрать домофон, который будет использован по умолчанию."""
+
+    if not relays:
+        return None
+    for relay in relays:
+        if relay.is_main:
+            return relay
+    return relays[0]
 
 
 def _validate_mac(value: str) -> bool:
