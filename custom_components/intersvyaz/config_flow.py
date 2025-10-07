@@ -380,20 +380,39 @@ def _datetime_to_iso(value) -> Optional[str]:
 
 
 def _coerce_buyer_id(relay: Optional[RelayInfo], token: Optional[MobileToken]) -> int:
-    """Найти подходящий buyerId, обрабатывая строковые значения."""
+    """Форсировать buyerId=1 для CRM, логируя отличия кандидатов."""
 
     candidates: List[Any] = []
     if relay and relay.relay_id:
         candidates.append(relay.relay_id)
     if token and token.profile_id is not None:
         candidates.append(token.profile_id)
+
+    normalized_candidates: List[int] = []
     for candidate in candidates:
         try:
-            # Отдельные API возвращают идентификаторы строкой – конвертируем их в int.
-            buyer_id = int(candidate)
+            # CRM ожидает единицу, но мы собираем числовые значения для диагностики.
+            normalized_candidates.append(int(candidate))
         except (TypeError, ValueError):
-            continue
-        if buyer_id > 0:
-            return buyer_id
+            _LOGGER.debug(
+                "Не удалось преобразовать candidate=%s в buyer_id, пропускаем", candidate
+            )
+
+    if normalized_candidates and any(
+        candidate != DEFAULT_BUYER_ID for candidate in normalized_candidates
+    ):
+        # CRM возвращает 401 при любых значениях, кроме 1, поэтому принудительно подменяем.
+        _LOGGER.warning(
+            "CRM ожидает buyer_id=%s, но API предложило %s — используем значение по умолчанию",
+            DEFAULT_BUYER_ID,
+            normalized_candidates,
+        )
+    else:
+        _LOGGER.debug(
+            "CRM использует buyer_id=%s, кандидаты=%s",
+            DEFAULT_BUYER_ID,
+            normalized_candidates or candidates,
+        )
+
     return DEFAULT_BUYER_ID
 
