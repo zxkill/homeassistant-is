@@ -8,16 +8,13 @@ DATA_CONFIG = "config"
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
 SEND_PHONE_ENDPOINT = "/mobile/auth/get-confirm"
-
-#{
-    #'checkSkipAuth': 1,
-    #'phone': '9080485745',
-    #'deviceId': '60113CFC-044B-435C-9679-BB89A2EE3DBA'
-#}
-
-CONFIRM_CODE_ENDPOINT = "/auth/code"
+CONFIRM_CODE_ENDPOINT = "/mobile/auth/check-confirm"
 REFRESH_TOKEN_ENDPOINT = "/auth/refresh"
 OPEN_DOOR_ENDPOINT = "/door/open"
+
+# Значения по умолчанию для технических параметров авторизации
+DEFAULT_DEVICE_ID = "60113CFC-044B-435C-9679-BB89A2EE3DBA"
+DEFAULT_APP_VERSION = "2.11.0"
 
 # Интервалы и таймауты
 DEFAULT_TIMEOUT = 30

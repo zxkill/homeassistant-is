@@ -87,6 +87,11 @@ def test_integration_importable(repo_root: Path) -> None:
     helpers_module.aiohttp_client = aiohttp_client_module
     aiohttp_client_module.async_get_clientsession = _async_get_clientsession
 
+    # Удаляем подмены из других тестов, чтобы получить настоящий пакет интеграции.
+    for name in list(sys.modules):
+        if name == "custom_components" or name.startswith("custom_components.intersvyaz"):
+            sys.modules.pop(name)
+
     module = importlib.import_module("custom_components.intersvyaz")
     assert hasattr(module, "async_setup_entry"), (
         "Интеграция должна предоставлять функцию async_setup_entry"
