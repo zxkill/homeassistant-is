@@ -10,15 +10,35 @@
       },
       "sms_code": {
         "title": "Подтверждение входа",
-        "description": "{auth_message}{error_message}",
+        "description": "{auth_message}",
         "data": {
           "sms_code": "Код подтверждения"
+        }
+      },
+      "select_account": {
+        "title": "Выбор договора",
+        "description": "Выберите адрес, привязанный к аккаунту.\n{addresses}\n{error_message}",
+        "data": {
+          "user_id": "Договор"
+        }
+      },
+      "account_options": {
+        "title": "Настройка домофона",
+        "description": "Укажите параметры домофона и идентификатор покупателя.\n{addresses}\n{error_message}",
+        "data": {
+          "door_mac": "MAC-адрес домофона",
+          "door_entrance": "Номер подъезда",
+          "buyer_id": "Идентификатор покупателя"
         }
       }
     },
     "error": {
       "phone_submission_failed": "Не удалось отправить номер телефона. Проверьте данные и повторите попытку.",
-      "code_confirmation_failed": "Введенный код не принят сервером. Попробуйте снова."
+      "code_confirmation_failed": "Введенный код не принят сервером. Попробуйте снова.",
+      "no_addresses": "Для указанного номера не найдено договоров.",
+      "token_request_failed": "Не удалось получить токен авторизации. Попробуйте снова.",
+      "crm_auth_failed": "Не удалось выполнить авторизацию во второй системе.",
+      "invalid_mac": "Введите MAC-адрес в формате XX:XX:XX:XX:XX:XX."
     }
   }
 }

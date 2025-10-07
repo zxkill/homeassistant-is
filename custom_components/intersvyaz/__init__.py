@@ -1,21 +1,30 @@
-"""Основной модуль интеграции Intersvyaz для Home Assistant."""
+"""Точка входа интеграции Intersvyaz для Home Assistant."""
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 from typing import Any, Dict
 
+import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .api import IntersvyazApiClient, IntersvyazApiError, TokenInfo
+from .api import IntersvyazApiClient, IntersvyazApiError
+from .coordinator import IntersvyazDataUpdateCoordinator
 from .const import (
-    CONF_ACCESS_TOKEN,
-    CONF_ACCESS_TOKEN_EXPIRES_AT,
-    CONF_REFRESH_TOKEN,
+    CONF_BUYER_ID,
+    CONF_CRM_TOKEN,
+    CONF_DEVICE_ID,
+    CONF_DOOR_ENTRANCE,
+    CONF_DOOR_MAC,
+    CONF_MOBILE_TOKEN,
     DATA_API_CLIENT,
     DATA_CONFIG,
+    DATA_COORDINATOR,
+    DEFAULT_BUYER_ID,
     DOMAIN,
     LOGGER_NAME,
     SERVICE_OPEN_DOOR,
@@ -23,114 +32,118 @@ from .const import (
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
+PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON]
+
+SERVICE_OPEN_DOOR_SCHEMA = vol.Schema({vol.Required("entry_id"): cv.string})
+
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Настроить интеграцию Intersvyaz на основе записи конфигурации."""
 
-    _LOGGER.info("Запуск настройки конфигурации entry_id=%s", entry.entry_id)
-
+    _LOGGER.info("Запуск настройки entry_id=%s", entry.entry_id)
     hass.data.setdefault(DOMAIN, {})
-    session = async_get_clientsession(hass)
-    api_client = IntersvyazApiClient(session=session)
 
-    token_info = _create_token_info_from_entry(entry.data)
-    if token_info:
-        api_client.set_token_info(token_info)
+    config_data = dict(entry.data)
+    session = async_get_clientsession(hass)
+    buyer_id = int(config_data.get(CONF_BUYER_ID, DEFAULT_BUYER_ID))
+
+    api_client = IntersvyazApiClient(
+        session=session,
+        device_id=config_data.get(CONF_DEVICE_ID),
+        buyer_id=buyer_id,
+    )
+
+    if CONF_MOBILE_TOKEN in config_data:
+        api_client.set_mobile_token(config_data[CONF_MOBILE_TOKEN])
+    if CONF_CRM_TOKEN in config_data:
+        api_client.set_crm_token(config_data[CONF_CRM_TOKEN])
+
+    coordinator = IntersvyazDataUpdateCoordinator(hass, api_client)
+    await coordinator.async_config_entry_first_refresh()
+
+    async def _async_open_door() -> None:
+        mac = config_data[CONF_DOOR_MAC]
+        door_id = int(config_data[CONF_DOOR_ENTRANCE])
+        _LOGGER.info(
+            "Выполняем команду открытия домофона для entry_id=%s",
+            entry.entry_id,
+        )
+        await api_client.async_open_door(mac, door_id)
+        await _persist_tokens(hass, entry, api_client)
 
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_API_CLIENT: api_client,
-        DATA_CONFIG: dict(entry.data),
+        DATA_COORDINATOR: coordinator,
+        DATA_CONFIG: config_data,
+        DATA_OPEN_DOOR: _async_open_door,
     }
 
-    async def handle_open_door(call: ServiceCall) -> None:
-        """Обработчик сервиса открытия домофона."""
+    if not hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR):
 
-        _LOGGER.info(
-            "Получена команда на открытие домофона для entry_id=%s", entry.entry_id
+        async def handle_open_door(call: ServiceCall) -> None:
+            """Открыть домофон с использованием сохранённой конфигурации."""
+
+            service_entry_id = call.data["entry_id"]
+            domain_data = hass.data.get(DOMAIN, {})
+            entry_storage = domain_data.get(service_entry_id)
+            if not entry_storage:
+                raise HomeAssistantError(
+                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
+                )
+            open_door_callable = entry_storage[DATA_OPEN_DOOR]
+            try:
+                await open_door_callable()
+            except IntersvyazApiError as err:
+                _LOGGER.error("Не удалось открыть домофон: %s", err)
+                raise HomeAssistantError(str(err)) from err
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_OPEN_DOOR,
+            handle_open_door,
+            schema=SERVICE_OPEN_DOOR_SCHEMA,
         )
-        try:
-            await api_client.async_open_door()
-        except IntersvyazApiError as err:
-            _LOGGER.error("Не удалось открыть домофон: %s", err)
-            raise
-        else:
-            await _sync_token_info_with_entry(hass, entry, api_client)
 
-    hass.services.async_register(DOMAIN, SERVICE_OPEN_DOOR, handle_open_door)
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _LOGGER.info("Интеграция Intersvyaz успешно настроена")
-
     return True
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Выгрузить конфигурацию интеграции."""
 
-    _LOGGER.info("Выгрузка конфигурации entry_id=%s", entry.entry_id)
+    _LOGGER.info("Выгрузка entry_id=%s", entry.entry_id)
 
-    hass.services.async_remove(DOMAIN, SERVICE_OPEN_DOOR)
-    hass.data[DOMAIN].pop(entry.entry_id, None)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    domain_store = hass.data.get(DOMAIN, {})
+    domain_store.pop(entry.entry_id, None)
+    if not domain_store:
+        hass.services.async_remove(DOMAIN, SERVICE_OPEN_DOOR)
+        hass.data.pop(DOMAIN, None)
 
-    if not hass.data[DOMAIN]:
-        hass.data.pop(DOMAIN)
-
-    return True
-
-
-def _create_token_info_from_entry(data: Dict[str, Any]) -> TokenInfo | None:
-    """Создать объект TokenInfo из данных записи конфигурации."""
-
-    access_token = data.get(CONF_ACCESS_TOKEN)
-    refresh_token = data.get(CONF_REFRESH_TOKEN)
-    expires_at_str = data.get(CONF_ACCESS_TOKEN_EXPIRES_AT)
-
-    if not access_token or not refresh_token or not expires_at_str:
-        _LOGGER.debug("В записи конфигурации отсутствуют сохраненные токены")
-        return None
-
-    try:
-        expires_at = datetime.fromisoformat(expires_at_str)
-    except (TypeError, ValueError) as err:
-        _LOGGER.error("Не удалось разобрать время истечения токена: %s", err)
-        return None
-
-    _LOGGER.debug(
-        "Восстановлены токены из конфигурации, истекают в %s",
-        expires_at.isoformat(),
-    )
-    return TokenInfo(
-        access_token=access_token,
-        refresh_token=refresh_token,
-        expires_at=expires_at,
-    )
+    return unload_ok
 
 
-async def _sync_token_info_with_entry(
+async def _persist_tokens(
     hass: HomeAssistant, entry: ConfigEntry, api_client: IntersvyazApiClient
 ) -> None:
-    """Сохранить обновленные токены в записи конфигурации."""
+    """Сохранить обновлённые токены в записи конфигурации."""
 
-    if not api_client.token_info:
-        _LOGGER.debug("Клиент API не содержит актуальной информации о токенах")
+    domain_store = hass.data.get(DOMAIN)
+    if not domain_store or entry.entry_id not in domain_store:
+        _LOGGER.debug(
+            "Запрошено сохранение токенов, но запись entry_id=%s не найдена", entry.entry_id
+        )
         return
+    stored = domain_store[entry.entry_id]
+    config_data: Dict[str, Any] = dict(stored.get(DATA_CONFIG, {}))
 
-    token_info = api_client.token_info
-    assert token_info is not None
+    if api_client.mobile_token:
+        config_data[CONF_MOBILE_TOKEN] = api_client.mobile_token.raw
+    if api_client.crm_token:
+        config_data[CONF_CRM_TOKEN] = api_client.crm_token.raw
 
-    _LOGGER.debug(
-        "Сохранение токенов в записи конфигурации entry_id=%s", entry.entry_id
-    )
-
-    new_data = {
-        **entry.data,
-        CONF_ACCESS_TOKEN: token_info.access_token,
-        CONF_REFRESH_TOKEN: token_info.refresh_token,
-        CONF_ACCESS_TOKEN_EXPIRES_AT: token_info.expires_at.isoformat(),
-    }
-
-    hass.config_entries.async_update_entry(entry, data=new_data)
-
-    stored_entry = hass.data[DOMAIN].get(entry.entry_id, {})
-    if stored_entry:
-        stored_entry[DATA_CONFIG] = new_data
-
-    _LOGGER.debug("Токены успешно сохранены в конфигурации")
+    if config_data != entry.data:
+        _LOGGER.debug("Обнаружены обновления токенов, сохраняем в конфигурации")
+        hass.config_entries.async_update_entry(entry, data=config_data)
+        stored[DATA_CONFIG] = config_data

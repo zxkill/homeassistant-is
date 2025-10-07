@@ -65,6 +65,9 @@ def test_integration_importable(repo_root: Path) -> None:
     core_module = ensure_module("homeassistant.core")
     helpers_module = ensure_module("homeassistant.helpers")
     aiohttp_client_module = ensure_module("homeassistant.helpers.aiohttp_client")
+    update_coordinator_module = ensure_module("homeassistant.helpers.update_coordinator")
+    const_module = ensure_module("homeassistant.const")
+    exceptions_module = ensure_module("homeassistant.exceptions")
 
     # Добавляем минимальные объекты, которые использует интеграция.
     class _ConfigEntry:  # pragma: no cover - класс используется только как заглушка
@@ -86,6 +89,31 @@ def test_integration_importable(repo_root: Path) -> None:
     core_module.ServiceCall = _ServiceCall
     helpers_module.aiohttp_client = aiohttp_client_module
     aiohttp_client_module.async_get_clientsession = _async_get_clientsession
+    const_module.Platform = types.SimpleNamespace(SENSOR="sensor", BUTTON="button")
+
+    class _HomeAssistantError(Exception):  # pragma: no cover - заглушка ошибки
+        pass
+
+    exceptions_module.HomeAssistantError = _HomeAssistantError
+
+    def _cv_string(value):  # pragma: no cover - простая имитация cv.string
+        return value
+
+    helpers_module.config_validation = types.SimpleNamespace(string=_cv_string)
+    helpers_module.update_coordinator = update_coordinator_module
+
+    class _DataUpdateCoordinator:  # pragma: no cover - простая заглушка
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def __class_getitem__(cls, _item):  # type: ignore[override]
+            return cls
+
+    class _UpdateFailed(Exception):  # pragma: no cover - заглушка ошибки
+        pass
+
+    update_coordinator_module.DataUpdateCoordinator = _DataUpdateCoordinator
+    update_coordinator_module.UpdateFailed = _UpdateFailed
 
     # Удаляем подмены из других тестов, чтобы получить настоящий пакет интеграции.
     for name in list(sys.modules):

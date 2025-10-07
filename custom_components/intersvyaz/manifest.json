@@ -1,7 +1,7 @@
 {
   "domain": "intersvyaz",
   "name": "Intersvyaz Doorphone",
-  "version": "0.1.1",
+  "version": "1.0.0",
   "documentation": "https://github.com/zxkill/homeassistant-is#readme",
   "issue_tracker": "https://github.com/zxkill/homeassistant-is/issues",
   "requirements": [],
