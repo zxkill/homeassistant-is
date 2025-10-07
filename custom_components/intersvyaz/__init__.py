@@ -25,6 +25,7 @@ from .const import (
     DATA_API_CLIENT,
     DATA_CONFIG,
     DATA_COORDINATOR,
+    DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOMAIN,
     LOGGER_NAME,
@@ -63,15 +64,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await coordinator.async_config_entry_first_refresh()
 
     async def _async_open_door() -> None:
+        """Асинхронно открыть домофон, используя сохранённую конфигурацию."""
+
         mac = config_data[CONF_DOOR_MAC]
         door_id = int(config_data.get(CONF_RELAY_NUM, config_data[CONF_DOOR_ENTRANCE]))
         _LOGGER.info(
-            "Выполняем команду открытия домофона для entry_id=%s",
+            "Выполняем команду открытия домофона для entry_id=%s (mac=%s, door_id=%s)",
             entry.entry_id,
+            mac,
+            door_id,
         )
         await api_client.async_open_door(mac, door_id)
         await _persist_tokens(hass, entry, api_client)
 
+    # Сохраняем все вспомогательные сущности в хранилище Home Assistant, чтобы
+    # сервисы и другие части интеграции могли безопасно переиспользовать их.
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_API_CLIENT: api_client,
         DATA_COORDINATOR: coordinator,
