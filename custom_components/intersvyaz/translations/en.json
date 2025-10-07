@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Intersvyaz authorization",
+        "description": "Enter the phone number to receive confirmation instructions.",
+        "data": {
+          "phone_number": "Phone number"
+        }
+      },
+      "sms_code": {
+        "title": "Verification",
+        "description": "{auth_message}{error_message}",
+        "data": {
+          "sms_code": "Confirmation code"
+        }
+      }
+    },
+    "error": {
+      "phone_submission_failed": "Failed to send the phone number. Please check the data and try again.",
+      "code_confirmation_failed": "The entered code was rejected. Please try again."
+    }
+  }
+}

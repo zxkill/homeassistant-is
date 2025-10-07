@@ -1,0 +1,24 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Авторизация Intersvyaz",
+        "description": "Введите номер телефона, чтобы получить инструкции по подтверждению.",
+        "data": {
+          "phone_number": "Номер телефона"
+        }
+      },
+      "sms_code": {
+        "title": "Подтверждение входа",
+        "description": "{auth_message}{error_message}",
+        "data": {
+          "sms_code": "Код подтверждения"
+        }
+      }
+    },
+    "error": {
+      "phone_submission_failed": "Не удалось отправить номер телефона. Проверьте данные и повторите попытку.",
+      "code_confirmation_failed": "Введённый код отклонён сервером. Попробуйте снова."
+    }
+  }
+}
