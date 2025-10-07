@@ -2,11 +2,21 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+import sys
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock
 
 import pytest
+
+pytest.importorskip("voluptuous", reason="Модуль интеграции использует voluptuous")
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    # Добавляем корень репозитория в sys.path, чтобы импортировать пакет интеграции
+    # как namespace-package даже без установки через pip.
+    sys.path.insert(0, str(REPO_ROOT))
 
 from custom_components.intersvyaz import async_setup_entry
 from custom_components.intersvyaz.const import (

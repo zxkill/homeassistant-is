@@ -6,6 +6,10 @@ import types
 
 import pytest
 
+pytest.importorskip(
+    "voluptuous", reason="Config flow требует voluptuous для валидации форм"
+)
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "intersvyaz"
 
 

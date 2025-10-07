@@ -5,7 +5,12 @@ import sys
 import types
 
 import pytest
-from aiohttp import ClientSession, web
+
+aiohttp = pytest.importorskip(
+    "aiohttp", reason="Тесты API требуют aiohttp для имитации облака"
+)
+ClientSession = aiohttp.ClientSession
+web = aiohttp.web
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "intersvyaz"
 

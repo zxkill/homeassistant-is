@@ -68,6 +68,8 @@ def test_integration_importable(repo_root: Path) -> None:
     update_coordinator_module = ensure_module("homeassistant.helpers.update_coordinator")
     const_module = ensure_module("homeassistant.const")
     exceptions_module = ensure_module("homeassistant.exceptions")
+    voluptuous_module = ensure_module("voluptuous")
+    aiohttp_module = ensure_module("aiohttp")
 
     # Добавляем минимальные объекты, которые использует интеграция.
     class _ConfigEntry:  # pragma: no cover - класс используется только как заглушка
@@ -101,6 +103,36 @@ def test_integration_importable(repo_root: Path) -> None:
 
     helpers_module.config_validation = types.SimpleNamespace(string=_cv_string)
     helpers_module.update_coordinator = update_coordinator_module
+
+    class _Schema:  # pragma: no cover - простая заглушка Schema
+        def __init__(self, _schema: object) -> None:
+            self._schema = _schema
+
+        def __call__(self, data: object) -> object:
+            return data
+
+    def _required(key: str) -> str:  # pragma: no cover - заглушка Required
+        return key
+
+    def _in(options: object) -> object:  # pragma: no cover - заглушка In
+        return options
+
+    voluptuous_module.Schema = _Schema  # type: ignore[attr-defined]
+    voluptuous_module.Required = _required  # type: ignore[attr-defined]
+    voluptuous_module.In = _in  # type: ignore[attr-defined]
+
+    class _ClientError(Exception):  # pragma: no cover - заглушка aiohttp.ClientError
+        pass
+
+    class _ClientResponse:  # pragma: no cover - используется только для аннотаций
+        pass
+
+    class _ClientSession:  # pragma: no cover - базовая заглушка клиента
+        pass
+
+    aiohttp_module.ClientError = _ClientError  # type: ignore[attr-defined]
+    aiohttp_module.ClientResponse = _ClientResponse  # type: ignore[attr-defined]
+    aiohttp_module.ClientSession = _ClientSession  # type: ignore[attr-defined]
 
     class _DataUpdateCoordinator:  # pragma: no cover - простая заглушка
         def __init__(self, *_args, **_kwargs) -> None:
