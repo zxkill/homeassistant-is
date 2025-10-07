@@ -27,6 +27,8 @@ sys.modules["custom_components.intersvyaz"] = intersvyaz_module
 API_MODULE = _load_module("custom_components.intersvyaz.api", "api.py")
 IntersvyazApiClient = API_MODULE.IntersvyazApiClient
 IntersvyazApiError = API_MODULE.IntersvyazApiError
+sanitize_request_context = API_MODULE._sanitize_request_context
+mask_string = API_MODULE._mask_string
 
 
 @pytest.fixture
@@ -242,6 +244,41 @@ async def test_full_authorization_flow(api_server) -> None:
         assert relay.opener and relay.opener.relay_num == 1
         assert relay.to_dict()["RELAY_ID"] == "50001"
         assert api_server.state["relays_requested"] == 1
+
+
+def test_mask_string_behaviour() -> None:
+    """Строки корректно маскируются для логов, сохраняя подсказку."""
+
+    assert mask_string("1234567890", keep_ends=True) == "12***90"
+    assert mask_string("abcd", keep_ends=False) == "***"
+    assert mask_string("", keep_ends=True) == "***"
+
+
+def test_sanitize_request_context_masks_sensitive_data() -> None:
+    """Контекст запроса не содержит токены и полные телефоны после маскировки."""
+
+    context = {
+        "method": "POST",
+        "url": "https://example/api",
+        "headers": {
+            "Authorization": "Bearer secret-token",
+            "X-Device-Id": "ABCDEF123456",
+        },
+        "json": {
+            "token": "secret-token",
+            "phone": "+79001234567",
+        },
+        "params": {"confirmCode": "1234"},
+    }
+    sanitized = sanitize_request_context(context)
+    assert sanitized["headers"]["Authorization"].startswith("Bearer ")
+    assert sanitized["headers"]["Authorization"].endswith("***")
+    assert sanitized["headers"]["X-Device-Id"].startswith("AB")
+    assert sanitized["headers"]["X-Device-Id"].endswith("56")
+    assert sanitized["json"]["token"] == "***"
+    assert sanitized["json"]["phone"].startswith("+7")
+    assert sanitized["json"]["phone"].endswith("67")
+    assert sanitized["params"]["confirmCode"] == "***"
 
 
 @pytest.mark.asyncio

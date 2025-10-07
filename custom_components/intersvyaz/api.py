@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,22 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.api")
+
+# Набор ключей, которые необходимо маскировать полностью при логировании.
+_FULL_MASK_KEYS = {
+    "token",
+    "confirmcode",
+    "code",
+    "password",
+    "authid",
+}
+
+# Набор ключей, которые удобнее показывать частично (например, телефон или device_id).
+_PARTIAL_MASK_KEYS = {
+    "phone",
+    "x-device-id",
+    "unique_device_id",
+}
 
 
 @dataclass
@@ -181,6 +198,68 @@ class RelayInfo:
         return normalized
 
 
+def _mask_string(value: str, *, keep_ends: bool) -> str:
+    """Скрыть часть строкового значения, сохранив подсказку для отладки."""
+
+    if not value:
+        return "***"
+    if not keep_ends or len(value) <= 4:
+        return "***"
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def _sanitize_value(key: str, value: Any) -> Any:
+    """Рекурсивно маскировать конфиденциальные данные в структуре запроса."""
+
+    lowered_key = key.lower()
+    if isinstance(value, dict):
+        return {k: _sanitize_value(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(key, item) for item in value]
+    if lowered_key in _FULL_MASK_KEYS:
+        if isinstance(value, str):
+            return _mask_string(value, keep_ends=False)
+        return "***"
+    if lowered_key in _PARTIAL_MASK_KEYS:
+        if isinstance(value, str):
+            return _mask_string(value, keep_ends=True)
+        if isinstance(value, (int, float)):
+            # Для числовых значений телефонов возвращаем последние цифры.
+            stringified = str(value)
+            return _mask_string(stringified, keep_ends=True)
+        return "***"
+    if lowered_key == "authorization" and isinstance(value, str):
+        # Авторизационный заголовок имеет формат "Bearer <токен>",
+        # поэтому маскируем только секретную часть.
+        parts = value.split(" ", 1)
+        if len(parts) == 2:
+            return f"{parts[0]} {_mask_string(parts[1], keep_ends=False)}"
+        return _mask_string(value, keep_ends=False)
+    return value
+
+
+def _sanitize_request_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Создать безопасную копию контекста запроса для логирования."""
+
+    sanitized = deepcopy(context)
+    if "headers" in sanitized and isinstance(sanitized["headers"], dict):
+        sanitized["headers"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["headers"].items()
+        }
+    if "json" in sanitized and isinstance(sanitized["json"], dict):
+        sanitized["json"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["json"].items()
+        }
+    if "params" in sanitized and isinstance(sanitized["params"], dict):
+        sanitized["params"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["params"].items()
+        }
+    return sanitized
+
+
 def generate_device_id() -> str:
     """Сгенерировать псевдо-уникальный идентификатор устройства."""
 
@@ -223,6 +302,8 @@ class IntersvyazApiClient:
         # Состояние текущей авторизации.
         self._mobile_token: Optional[MobileToken] = None
         self._crm_token: Optional[CrmToken] = None
+        # Сохраняем последний отправленный запрос, чтобы вывести его при ошибке.
+        self._last_request_context: Optional[Dict[str, Any]] = None
 
         _LOGGER.debug(
             "Создан клиент Intersvyaz: api_base_url=%s, crm_base_url=%s, device_id=%s",
@@ -647,13 +728,17 @@ class IntersvyazApiClient:
         """Универсальная обёртка над HTTP-запросом."""
 
         url = f"{base_url}{endpoint}"
+        request_context = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "json": json or {},
+            "params": params or {},
+        }
+        self._last_request_context = _sanitize_request_context(request_context)
         _LOGGER.debug(
-            "Запрос %s %s: headers=%s json=%s params=%s",
-            method,
-            url,
-            headers,
-            json,
-            params,
+            "Готовим запрос к API: %s",
+            self._last_request_context,
         )
         try:
             async with asyncio.timeout(self._timeout):
@@ -678,7 +763,10 @@ class IntersvyazApiClient:
         text = await response.text()
         if response.status >= 400:
             _LOGGER.error(
-                "Сервер вернул ошибку %s: %s", response.status, text
+                "Сервер вернул ошибку %s: %s. Контекст запроса: %s",
+                response.status,
+                text,
+                self._last_request_context,
             )
             raise IntersvyazApiError(
                 f"API вернуло ошибку {response.status}: {text}"

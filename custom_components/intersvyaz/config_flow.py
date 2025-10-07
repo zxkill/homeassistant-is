@@ -235,15 +235,9 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._relay_payload = relay.to_dict()
         self._selected_relay = relay
 
-        # В некоторых городах `RELAY_ID` совпадает с buyerId, поэтому пробуем использовать его,
-        # а в качестве безопасного значения подставляем profile_id из мобильного токена.
-        if relay.relay_id:
-            try:
-                self._buyer_id = int(relay.relay_id)
-            except ValueError:
-                self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
-        else:
-            self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
+        # В некоторых городах `RELAY_ID` совпадает с buyerId. Чтобы исключить ошибки 401,
+        # приводим все идентификаторы к int и подставляем профайл либо дефолт как запасной.
+        self._buyer_id = _coerce_buyer_id(relay, self._mobile_token)
 
         _LOGGER.info(
             "Выбран домофон %s (mac=%s, relay_num=%s, buyer_id=%s)",
@@ -383,4 +377,23 @@ def _datetime_to_iso(value) -> Optional[str]:
     if value is None:
         return None
     return value.isoformat()
+
+
+def _coerce_buyer_id(relay: Optional[RelayInfo], token: Optional[MobileToken]) -> int:
+    """Найти подходящий buyerId, обрабатывая строковые значения."""
+
+    candidates: List[Any] = []
+    if relay and relay.relay_id:
+        candidates.append(relay.relay_id)
+    if token and token.profile_id is not None:
+        candidates.append(token.profile_id)
+    for candidate in candidates:
+        try:
+            # Отдельные API возвращают идентификаторы строкой – конвертируем их в int.
+            buyer_id = int(candidate)
+        except (TypeError, ValueError):
+            continue
+        if buyer_id > 0:
+            return buyer_id
+    return DEFAULT_BUYER_ID
 

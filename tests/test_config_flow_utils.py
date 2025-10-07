@@ -141,3 +141,123 @@ def test_select_preferred_relay() -> None:
         [secondary_relay, main_relay]
     )
     assert selected is main_relay
+
+
+def test_coerce_buyer_id_prefers_relay_id() -> None:
+    """buyerId приводится к int и приоритетно берёт значение из реле."""
+
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    MobileToken = CONFIG_FLOW_MODULE.MobileToken
+    relay = RelayInfo(
+        address="Основной вход",
+        relay_id="50001",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    token = MobileToken(
+        token="test-token",
+        user_id=1,
+        profile_id=777,
+        access_begin=None,
+        access_end=None,
+        phone=None,
+        unique_device_id=None,
+        raw={},
+    )
+    buyer_id = CONFIG_FLOW_MODULE._coerce_buyer_id(relay, token)
+    assert buyer_id == 50001
+
+
+def test_coerce_buyer_id_uses_profile_id_if_relay_invalid() -> None:
+    """Если relay_id некорректен, используется profile_id из токена."""
+
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    MobileToken = CONFIG_FLOW_MODULE.MobileToken
+    relay = RelayInfo(
+        address="Основной вход",
+        relay_id="не число",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    token = MobileToken(
+        token="test-token",
+        user_id=1,
+        profile_id=321,
+        access_begin=None,
+        access_end=None,
+        phone=None,
+        unique_device_id=None,
+        raw={},
+    )
+    buyer_id = CONFIG_FLOW_MODULE._coerce_buyer_id(relay, token)
+    assert buyer_id == 321
+
+
+def test_coerce_buyer_id_defaults_when_all_invalid() -> None:
+    """Если все кандидаты некорректны, возвращается значение по умолчанию."""
+
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    MobileToken = CONFIG_FLOW_MODULE.MobileToken
+    relay = RelayInfo(
+        address="Основной вход",
+        relay_id="не число",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    token = MobileToken(
+        token="test-token",
+        user_id=1,
+        profile_id=None,
+        access_begin=None,
+        access_end=None,
+        phone=None,
+        unique_device_id=None,
+        raw={},
+    )
+    buyer_id = CONFIG_FLOW_MODULE._coerce_buyer_id(relay, token)
+    assert buyer_id == CONFIG_FLOW_MODULE.DEFAULT_BUYER_ID
