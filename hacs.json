@@ -1,0 +1,7 @@
+{
+  "name": "Intersvyaz Doorphone",
+  "content_in_root": false,
+  "render_readme": true,
+  "domains": ["intersvyaz"],
+  "homeassistant": "2023.5.0"
+}
