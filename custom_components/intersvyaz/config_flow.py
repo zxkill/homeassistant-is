@@ -321,8 +321,14 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         options = {address.user_id: address.address for address in self._addresses}
         schema = vol.Schema({vol.Required("user_id"): vol.In(options)})
         placeholders = {"addresses": "\n".join(options.values())}
+        # Даже при отсутствии ошибок Home Assistant должен получить плейсхолдер
+        # `error_message`, иначе перевод рухнет с KeyError. Поэтому всегда
+        # передаём строку, дополняя её текстом ошибки и отступами только при
+        # необходимости, чтобы описание оставалось читабельным.
         if self._last_error_message:
-            placeholders["error_message"] = self._last_error_message
+            placeholders["error_message"] = f"\n\n{self._last_error_message}"
+        else:
+            placeholders["error_message"] = ""
         return self.async_show_form(
             step_id="select_account",
             data_schema=schema,

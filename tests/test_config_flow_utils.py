@@ -92,6 +92,29 @@ def test_build_description_placeholders() -> None:
     assert "Неверный код подтверждения" in placeholders["auth_message"]
 
 
+def test_select_account_placeholders_always_provide_error_key() -> None:
+    """Шаг выбора договора всегда передаёт плейсхолдер ошибки для переводов."""
+
+    flow = CONFIG_FLOW_MODULE.IntersvyazConfigFlow()
+    flow.hass = types.SimpleNamespace(config=types.SimpleNamespace(language="ru-RU"))
+    ConfirmAddress = CONFIG_FLOW_MODULE.ConfirmAddress
+    flow._addresses = [
+        ConfirmAddress(user_id="1", address="г. Челябинск, ул. Примерная, д. 1")
+    ]
+
+    # Без ошибки плейсхолдер должен присутствовать и быть пустой строкой.
+    flow._last_error_message = None
+    result = flow._show_select_account_form()
+    placeholders = result["description_placeholders"]
+    assert placeholders["error_message"] == ""
+
+    # При ошибке плейсхолдер добавляет отступ и сам текст сообщения.
+    flow._last_error_message = "CRM вернула 401"
+    result_with_error = flow._show_select_account_form()
+    placeholders_with_error = result_with_error["description_placeholders"]
+    assert placeholders_with_error["error_message"].strip() == "CRM вернула 401"
+
+
 def test_select_preferred_relay() -> None:
     """Выбор домофона отдаёт приоритет основному входу."""
 
