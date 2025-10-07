@@ -157,8 +157,13 @@ async def api_server(aiohttp_server):
     async def handle_crm_auth(request: web.Request) -> web.Response:
         state["crm_auth_calls"] += 1
         payload = await request.json()
+        # CRM сервис ожидает увидеть мобильный токен как в теле запроса,
+        # так и в заголовке Authorization, повторяя реальное API.
         if payload.get("token") != "primary-token":
             return web.json_response({"message": "bad token"}, status=401)
+        auth_header = request.headers.get("Authorization")
+        if auth_header != "Bearer primary-token":
+            return web.json_response({"message": "missing bearer"}, status=401)
         return web.json_response(
             {
                 "USER_ID": 3000001,

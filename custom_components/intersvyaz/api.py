@@ -362,6 +362,7 @@ class IntersvyazApiClient:
             "POST",
             CRM_AUTH_ENDPOINT,
             json=payload,
+            use_mobile_token=True,
         )
         _LOGGER.debug("Ответ CRM авторизации: %s", response)
         token = self._parse_crm_token(response)
@@ -422,11 +423,16 @@ class IntersvyazApiClient:
         await self._ensure_crm_token()
         assert self._crm_token is not None
         endpoint = CRM_OPEN_DOOR_ENDPOINT_TEMPLATE.format(mac=mac, door_id=door_id)
-        headers = self._build_crm_headers(include_bearer=True)
+        headers = self._build_crm_headers(include_crm_bearer=True)
         _LOGGER.info(
             "Отправляем команду на открытие домофона mac=%s door_id=%s", mac, door_id
         )
-        await self._request_crm("GET", endpoint, headers=headers)
+        await self._request_crm(
+            "GET",
+            endpoint,
+            headers=headers,
+            use_crm_token=True,
+        )
 
     # ------------------------------------------------------------------
     # Методы для получения информации о пользователе и балансе
@@ -541,7 +547,9 @@ class IntersvyazApiClient:
             headers[HEADER_AUTHORIZATION] = f"Bearer {self._mobile_token.token}"
         return headers
 
-    def _build_crm_headers(self, *, include_bearer: bool) -> Dict[str, str]:
+    def _build_crm_headers(
+        self, *, include_crm_bearer: bool, include_mobile_bearer: bool = False
+    ) -> Dict[str, str]:
         """Сформировать набор заголовков для CRM запросов."""
 
         headers = {
@@ -561,7 +569,13 @@ class IntersvyazApiClient:
             "Accept-Language": self._accept_language,
             "Content-Type": "application/json",
         }
-        if include_bearer and self._crm_token:
+        # Для первичной авторизации CRM сервер ожидает увидеть актуальный
+        # мобильный токен в заголовке Authorization. Это поведение было
+        # обнаружено при анализе сетевого трафика официального приложения,
+        # поэтому даём возможность явно добавить соответствующий заголовок.
+        if include_mobile_bearer and self._mobile_token:
+            headers[HEADER_AUTHORIZATION] = f"Bearer {self._mobile_token.token}"
+        if include_crm_bearer and self._crm_token:
             headers[HEADER_AUTHORIZATION] = f"Bearer {self._crm_token.token}"
         return headers
 
@@ -596,10 +610,20 @@ class IntersvyazApiClient:
         *,
         json: Optional[Dict[str, Any]] = None,
         headers: Optional[Dict[str, str]] = None,
+        use_crm_token: bool = False,
+        use_mobile_token: bool = False,
     ) -> Dict[str, Any]:
         """Выполнить HTTP-запрос к CRM-системе."""
 
-        merged_headers = self._build_crm_headers(include_bearer=False)
+        # По умолчанию CRM использует отдельный JWT. Однако для первичного
+        # обмена необходимо передать мобильный токен, поэтому параметры
+        # ``use_crm_token`` и ``use_mobile_token`` позволяют гибко управлять
+        # тем, какой заголовок Authorization будет сформирован.
+
+        merged_headers = self._build_crm_headers(
+            include_crm_bearer=use_crm_token,
+            include_mobile_bearer=use_mobile_token,
+        )
         if headers:
             merged_headers.update(headers)
         return await self._request(
