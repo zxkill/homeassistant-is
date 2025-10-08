@@ -194,3 +194,16 @@ def test_resolve_balance_unit_falls_back_to_rub() -> None:
     with _load_sensor_module(has_enum=False, has_legacy_const=False) as module:
         assert module.BALANCE_UNIT == "RUB"
 
+
+def test_balance_sensor_omits_state_class(caplog: pytest.LogCaptureFixture) -> None:
+    """Убеждаемся, что сенсор баланса не использует запрещённый state_class."""
+
+    caplog.set_level(logging.DEBUG, logger="intersvyaz.sensor")
+    with _load_sensor_module(has_enum=True, has_legacy_const=True) as module:
+        coordinator = types.SimpleNamespace(data={"balance": {"balance": "15.5"}})
+        entry = types.SimpleNamespace(entry_id="test-entry")
+        sensor = module.IntersvyazBalanceSensor(coordinator, entry)
+        assert sensor._attr_state_class is None
+
+    assert "без state_class" in caplog.text
+

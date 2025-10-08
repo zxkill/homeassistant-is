@@ -31,6 +31,7 @@ from .const import (
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOMAIN,
+    EVENT_DOOR_OPEN_RESULT,
     LOGGER_NAME,
     SERVICE_OPEN_DOOR,
 )
@@ -87,27 +88,6 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         relays = []
 
-    def _make_open_callable(
-        *, mac: str, door_id: int, address: str, door_uid: str
-    ) -> Callable[[], Awaitable[None]]:
-        """Создать корутину для открытия конкретного домофона."""
-
-        async def _async_open_door() -> None:
-            """Выполнить команду открытия с подробным логированием."""
-
-            _LOGGER.info(
-                "Выполняем команду открытия домофона entry_id=%s uid=%s (mac=%s, door_id=%s, адрес=%s)",
-                entry.entry_id,
-                door_uid,
-                mac,
-                door_id,
-                address,
-            )
-            await api_client.async_open_door(mac, door_id)
-            await _persist_tokens(hass, entry, api_client)
-
-        return _async_open_door
-
     door_openers: List[Dict[str, Any]] = []
     seen_uids: set[str] = set()
 
@@ -160,7 +140,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             )
             continue
 
-        callback = _make_open_callable(
+        callback = build_open_door_callable(
+            hass,
+            entry,
+            api_client,
             mac=mac.upper(),
             door_id=int(door_id),
             address=address,
@@ -217,7 +200,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "relay_id": config_data.get(CONF_RELAY_ID),
                 "relay_num": config_data.get(CONF_RELAY_NUM),
                 "porch_num": config_data.get(CONF_DOOR_ENTRANCE),
-                "callback": _make_open_callable(
+                "callback": build_open_door_callable(
+                    hass,
+                    entry,
+                    api_client,
                     mac=fallback_mac or config_data.get(CONF_DOOR_MAC, ""),
                     door_id=fallback_door_id,
                     address=fallback_address,
@@ -326,6 +312,104 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.data.pop(DOMAIN, None)
 
     return unload_ok
+
+
+def build_open_door_callable(
+    hass: HomeAssistant,
+    entry: ConfigEntry,
+    api_client: IntersvyazApiClient,
+    *,
+    mac: str,
+    door_id: int,
+    address: str,
+    door_uid: str,
+) -> Callable[[], Awaitable[None]]:
+    """Сформировать корутину, открывающую конкретный домофон.
+
+    Функция вынесена отдельно, чтобы её можно было переиспользовать в тестах и
+    сервисе `open_door`. Команда сопровождается подробным логированием и
+    публикацией события о результате выполнения.
+    """
+
+    door_context = {
+        "mac": mac,
+        "door_id": door_id,
+        "address": address,
+        "door_uid": door_uid,
+    }
+
+    async def _async_open_door() -> None:
+        """Выполнить команду открытия домофона с контролем результата."""
+
+        _LOGGER.info(
+            "Старт открытия домофона entry_id=%s uid=%s (mac=%s, door_id=%s, адрес=%s)",
+            entry.entry_id,
+            door_uid,
+            mac,
+            door_id,
+            address,
+        )
+        try:
+            await api_client.async_open_door(mac, door_id)
+        except IntersvyazApiError as err:
+            _LOGGER.error(
+                "Домофон entry_id=%s uid=%s не открылся: %s",
+                entry.entry_id,
+                door_uid,
+                err,
+            )
+            _fire_door_open_event(
+                hass,
+                entry_id=entry.entry_id,
+                door_context=door_context,
+                success=False,
+                error=str(err),
+            )
+            raise
+
+        _LOGGER.info(
+            "Домофон entry_id=%s uid=%s успешно открылся (ожидался код 204)",
+            entry.entry_id,
+            door_uid,
+        )
+        _fire_door_open_event(
+            hass,
+            entry_id=entry.entry_id,
+            door_context=door_context,
+            success=True,
+        )
+        await _persist_tokens(hass, entry, api_client)
+
+    return _async_open_door
+
+
+def _fire_door_open_event(
+    hass: HomeAssistant,
+    *,
+    entry_id: str,
+    door_context: Dict[str, Any],
+    success: bool,
+    error: Optional[str] = None,
+) -> None:
+    """Отправить событие Home Assistant о результате открытия домофона."""
+
+    event_type = f"{DOMAIN}_{EVENT_DOOR_OPEN_RESULT}"
+    event_payload: Dict[str, Any] = {
+        "entry_id": entry_id,
+        "door_uid": door_context.get("door_uid"),
+        "address": door_context.get("address"),
+        "mac": door_context.get("mac"),
+        "door_id": door_context.get("door_id"),
+        "success": success,
+    }
+    if error:
+        event_payload["error"] = error
+    _LOGGER.debug(
+        "Публикуем событие %s с результатом открытия домофона: %s",
+        event_type,
+        event_payload,
+    )
+    hass.bus.async_fire(event_type, event_payload)
 
 
 async def _persist_tokens(

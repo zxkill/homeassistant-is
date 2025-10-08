@@ -114,3 +114,8 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 err,
             )
             raise
+        _LOGGER.info(
+            "Команда открытия домофона entry_id=%s uid=%s завершилась успешно",
+            self._entry.entry_id,
+            self._door_entry.get("uid"),
+        )

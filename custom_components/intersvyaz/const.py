@@ -40,6 +40,9 @@ DEFAULT_UPDATE_INTERVAL_MINUTES = 10
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
 
+# Названия событий Home Assistant
+EVENT_DOOR_OPEN_RESULT = "door_open_result"
+
 # Ключи данных для конфигурации и состояний токенов
 CONF_PHONE_NUMBER = "phone_number"
 CONF_DEVICE_ID = "device_id"
