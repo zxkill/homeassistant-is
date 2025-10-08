@@ -73,7 +73,8 @@ def _load_sensor_module(*, has_enum: bool, has_legacy_const: bool) -> Iterator[t
     core_module = types.ModuleType("homeassistant.core")
 
     class _HomeAssistant:  # pragma: no cover - пустая заглушка
-        pass
+        def __init__(self) -> None:
+            self._dispatcher = {}
 
     core_module.HomeAssistant = _HomeAssistant  # type: ignore[attr-defined]
     set_module("homeassistant.core", core_module)
@@ -101,6 +102,26 @@ def _load_sensor_module(*, has_enum: bool, has_legacy_const: bool) -> Iterator[t
     entity_platform_module.AddEntitiesCallback = _add_entities_stub  # type: ignore[attr-defined]
     set_module("homeassistant.helpers.entity_platform", entity_platform_module)
 
+    entity_module = types.ModuleType("homeassistant.helpers.entity")
+
+    class _EntityCategory(enum.Enum):  # pragma: no cover - перечень категорий
+        DIAGNOSTIC = "diagnostic"
+
+    entity_module.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
+    set_module("homeassistant.helpers.entity", entity_module)
+
+    dispatcher_module = types.ModuleType("homeassistant.helpers.dispatcher")
+
+    def _async_dispatcher_connect(*_args, **_kwargs):  # pragma: no cover - пустая заглушка
+        return lambda: None
+
+    def _async_dispatcher_send(*_args, **_kwargs) -> None:  # pragma: no cover
+        return None
+
+    dispatcher_module.async_dispatcher_connect = _async_dispatcher_connect  # type: ignore[attr-defined]
+    dispatcher_module.async_dispatcher_send = _async_dispatcher_send  # type: ignore[attr-defined]
+    set_module("homeassistant.helpers.dispatcher", dispatcher_module)
+
     update_coordinator_module = types.ModuleType("homeassistant.helpers.update_coordinator")
 
     class _CoordinatorEntity:  # pragma: no cover - минимальная реализация миксина
@@ -109,6 +130,8 @@ def _load_sensor_module(*, has_enum: bool, has_legacy_const: bool) -> Iterator[t
 
     update_coordinator_module.CoordinatorEntity = _CoordinatorEntity  # type: ignore[attr-defined]
     set_module("homeassistant.helpers.update_coordinator", update_coordinator_module)
+    helpers_module.entity = entity_module  # type: ignore[attr-defined]
+    helpers_module.dispatcher = dispatcher_module  # type: ignore[attr-defined]
     helpers_module.update_coordinator = update_coordinator_module  # type: ignore[attr-defined]
 
     aiohttp_client_module = types.ModuleType("homeassistant.helpers.aiohttp_client")
@@ -193,4 +216,17 @@ def test_resolve_balance_unit_falls_back_to_rub() -> None:
 
     with _load_sensor_module(has_enum=False, has_legacy_const=False) as module:
         assert module.BALANCE_UNIT == "RUB"
+
+
+def test_balance_sensor_omits_state_class(caplog: pytest.LogCaptureFixture) -> None:
+    """Убеждаемся, что сенсор баланса не использует запрещённый state_class."""
+
+    caplog.set_level(logging.DEBUG, logger="intersvyaz.sensor")
+    with _load_sensor_module(has_enum=True, has_legacy_const=True) as module:
+        coordinator = types.SimpleNamespace(data={"balance": {"balance": "15.5"}})
+        entry = types.SimpleNamespace(entry_id="test-entry")
+        sensor = module.IntersvyazBalanceSensor(coordinator, entry)
+        assert sensor._attr_state_class is None
+
+    assert "без state_class" in caplog.text
 

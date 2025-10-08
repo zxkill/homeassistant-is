@@ -7,6 +7,7 @@ DATA_CONFIG = "config"
 DATA_COORDINATOR = "coordinator"
 DATA_OPEN_DOOR = "open_door"
 DATA_DOOR_OPENERS = "door_openers"
+DATA_DOOR_STATUSES = "door_statuses"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
@@ -36,9 +37,40 @@ DEFAULT_BUYER_ID = 1
 DEFAULT_TIMEOUT = 30
 TOKEN_EXPIRATION_MARGIN = 60
 DEFAULT_UPDATE_INTERVAL_MINUTES = 10
+# Время отображения результата на кнопке открытия домофона (в секундах)
+BUTTON_STATUS_RESET_DELAY_SECONDS = 3
+
+# Константы статусов открытия домофона. Мы отделяем машинное значение (code)
+# от пользовательского (label), чтобы кнопка, сенсор и README могли использовать
+# единое перечисление и при этом выводить понятные надписи.
+DOOR_STATUS_READY = "ready"
+DOOR_STATUS_OPENING = "opening"
+DOOR_STATUS_OPENED = "opened"
+DOOR_STATUS_ERROR = "error"
+
+DOOR_STATUS_LABELS = {
+    DOOR_STATUS_READY: "Готово",
+    DOOR_STATUS_OPENING: "Открываем…",
+    DOOR_STATUS_OPENED: "Открыто",
+    DOOR_STATUS_ERROR: "Ошибка",
+}
+
+# Сигнал шины dispatcher, используемый для синхронизации статуса кнопки и
+# одноимённого сенсора состояния домофона.
+SIGNAL_DOOR_STATUS_UPDATED = "intersvyaz_door_status_updated"
+
+# Ключи словаря статусов домофона. Их используют и кнопка, и сенсор.
+ATTR_STATUS_CODE = "status_code"
+ATTR_STATUS_LABEL = "status_label"
+ATTR_STATUS_UPDATED_AT = "updated_at"
+ATTR_STATUS_ERROR = "error"
+ATTR_STATUS_BUSY = "busy"
 
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
+
+# Названия событий Home Assistant
+EVENT_DOOR_OPEN_RESULT = "door_open_result"
 
 # Ключи данных для конфигурации и состояний токенов
 CONF_PHONE_NUMBER = "phone_number"
