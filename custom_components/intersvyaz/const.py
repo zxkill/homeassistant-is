@@ -36,6 +36,8 @@ DEFAULT_BUYER_ID = 1
 DEFAULT_TIMEOUT = 30
 TOKEN_EXPIRATION_MARGIN = 60
 DEFAULT_UPDATE_INTERVAL_MINUTES = 10
+# Время отображения результата на кнопке открытия домофона (в секундах)
+BUTTON_STATUS_RESET_DELAY_SECONDS = 3
 
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
