@@ -23,6 +23,12 @@ from .const import (
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.button")
 
+# Текстовые статусы, которые видит пользователь в интерфейсе Home Assistant.
+STATUS_READY = "Готово"
+STATUS_OPENING = "Открываем…"
+STATUS_OPENED = "Открыто"
+STATUS_ERROR = "Ошибка"
+
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
@@ -102,19 +108,40 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
         # Флаг, блокирующий повторные нажатия, пока действие выполняется или статус выводится пользователю.
         self._is_busy: bool = False
-        # Текстовый суффикс, отображающий текущий статус кнопки.
-        self._status_suffix: Optional[str] = None
+        # Храним текущий текстовый статус для отображения в интерфейсе.
+        self._status: str = STATUS_READY
         # Асинхронная задача, которая сбрасывает статус после небольшого ожидания.
         self._status_reset_task: Optional[asyncio.Task[None]] = None
+        # Изначально кнопка доступна к нажатию, а атрибуты отражают базовое состояние.
+        self._attr_available = True
+        self._attr_extra_state_attributes = self._compose_state_attributes()
 
     @property
     def name(self) -> str | None:
         """Вернуть имя кнопки с учётом динамического статуса."""
 
-        if not self._status_suffix:
+        if self._status == STATUS_READY:
             return self._base_name
         # Добавляем понятную подсказку: «Открыть домофон (Адрес) — Открыто/Ошибка/…».
-        return f"{self._base_name} — {self._status_suffix}"
+        return f"{self._base_name} — {self._status}"
+
+    @property
+    def state(self) -> str | None:
+        """Показываем текущий статус в столбце состояния карточки."""
+
+        return self._status
+
+    def _compose_state_attributes(self) -> dict[str, Optional[str] | bool]:
+        """Сформировать словарь атрибутов с контекстом домофона и статусом."""
+
+        return {
+            "door_uid": self._door_entry.get("uid"),
+            "door_address": self._door_entry.get("address"),
+            "door_mac": self._door_entry.get("mac"),
+            "door_id": self._door_entry.get("door_id"),
+            "status": self._status,
+            "busy": self._is_busy,
+        }
 
     async def async_press(self) -> None:
         """Отправить команду на открытие домофона."""
@@ -140,8 +167,8 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
             door_context,
         )
         # Переводим кнопку в «занято» и уведомляем пользователя о попытке открытия.
-        self._is_busy = True
-        self._update_status("Открываем…")
+        self._cancel_status_reset()
+        self._set_status(STATUS_OPENING, busy=True)
         try:
             await self._open_door_callable()
         except IntersvyazApiError as err:
@@ -152,7 +179,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 err,
             )
             # Показываем ошибку пользователю и планируем возврат к исходному состоянию.
-            self._update_status("Ошибка")
+            self._set_status(STATUS_ERROR, busy=True)
             self._schedule_status_reset()
             raise
         except Exception as err:  # pragma: no cover - неожиданные ошибки логируем подробно
@@ -162,7 +189,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 self._door_entry.get("uid"),
                 err,
             )
-            self._update_status("Ошибка")
+            self._set_status(STATUS_ERROR, busy=True)
             self._schedule_status_reset()
             raise
         _LOGGER.info(
@@ -171,24 +198,37 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
             self._door_entry.get("uid"),
         )
         # Сообщаем об успешном открытии и возвращаем кнопку в исходное состояние чуть позже.
-        self._update_status("Открыто")
+        self._set_status(STATUS_OPENED, busy=True)
         self._schedule_status_reset()
 
     async def async_will_remove_from_hass(self) -> None:
         """Отменить отложенные задачи перед удалением сущности."""
 
         self._cancel_status_reset(release_busy=True)
+        # Возвращаем кнопку в исходное состояние, чтобы при следующем добавлении не мигал старый статус.
+        self._set_status(STATUS_READY, busy=False)
 
-    def _update_status(self, suffix: Optional[str]) -> None:
-        """Обновить статус кнопки и синхронизировать его с интерфейсом."""
+    def _set_status(self, status: str, *, busy: Optional[bool] = None) -> None:
+        """Обновить текущий статус кнопки и синхронизировать его с интерфейсом."""
 
-        self._status_suffix = suffix
+        if busy is not None:
+            self._is_busy = busy
+        self._status = status
         _LOGGER.debug(
-            "Обновляем статус кнопки entry_id=%s uid=%s: %s",
+            "Обновляем статус кнопки entry_id=%s uid=%s: статус=%s, занятость=%s",
             self._entry.entry_id,
             self._door_entry.get("uid"),
-            suffix or "норма",
+            status,
+            self._is_busy,
         )
+        # Имя кнопки дополняем текущим статусом, чтобы пользователь видел результат прямо на панели.
+        if self._status == STATUS_READY:
+            self._attr_name = self._base_name
+        else:
+            self._attr_name = f"{self._base_name} — {self._status}"
+        # Пока статус показывается, блокируем повторное нажатие.
+        self._attr_available = not self._is_busy
+        self._attr_extra_state_attributes = self._compose_state_attributes()
         self.async_write_ha_state()
 
     def _schedule_status_reset(self) -> None:
@@ -214,8 +254,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 if cancelled:
                     return
                 # Если таймер завершился без отмены, разблокируем кнопку.
-                self._is_busy = False
-            self._update_status(None)
+                self._set_status(STATUS_READY, busy=False)
             self._status_reset_task = None
 
         # Создаём задачу сброса в текущем цикле событий.
@@ -230,3 +269,4 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
         self._status_reset_task = None
         if release_busy:
             self._is_busy = False
+            self._attr_available = True

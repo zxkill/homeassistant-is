@@ -96,11 +96,25 @@ def _load_button_module() -> Iterator[types.ModuleType]:
         def __init__(self) -> None:
             self._state_write_count = 0
             self.hass = None
+            self._attr_available = True
+            self._attr_extra_state_attributes: dict[str, object] | None = None
 
         def async_write_ha_state(self) -> None:
             """Фиксируем факт обновления состояния."""
 
             self._state_write_count += 1
+
+        @property
+        def available(self) -> bool:
+            """Вернуть признак доступности кнопки."""
+
+            return getattr(self, "_attr_available", True)
+
+        @property
+        def extra_state_attributes(self) -> dict[str, object] | None:
+            """Вернуть словарь атрибутов, если он заполнен тестируемым кодом."""
+
+            return getattr(self, "_attr_extra_state_attributes", None)
 
     button_module.ButtonEntity = _ButtonEntity  # type: ignore[attr-defined]
     components_module.button = button_module  # type: ignore[attr-defined]
@@ -258,18 +272,39 @@ def test_button_shows_success_and_resets(monkeypatch: pytest.MonkeyPatch) -> Non
         button.hass = SimpleNamespace(loop=asyncio.get_running_loop())
         base_name = button.name
 
+        assert button.state == module.STATUS_READY
+        assert button.available is True
+
         await button.async_press()
 
         assert open_mock.await_count == 1
-        assert button.name.endswith("Открыто")
-        assert button._is_busy is True
+        assert button.name.endswith(module.STATUS_OPENED)
+        assert button.state == module.STATUS_OPENED
+        assert button.available is False
+        assert button.extra_state_attributes == {
+            "door_uid": "door-1",
+            "door_address": "Подъезд 1",
+            "door_mac": None,
+            "door_id": None,
+            "status": module.STATUS_OPENED,
+            "busy": True,
+        }
 
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
         assert button.name == base_name
         assert button._is_busy is False
-        assert button._status_suffix is None
+        assert button.state == module.STATUS_READY
+        assert button.available is True
+        assert button.extra_state_attributes == {
+            "door_uid": "door-1",
+            "door_address": "Подъезд 1",
+            "door_mac": None,
+            "door_id": None,
+            "status": module.STATUS_READY,
+            "busy": False,
+        }
         assert getattr(button, "_state_write_count", 0) >= 3
 
     with _load_button_module() as module:
@@ -295,15 +330,17 @@ def test_button_displays_error_on_failure(monkeypatch: pytest.MonkeyPatch) -> No
         with pytest.raises(module.IntersvyazApiError):
             await button.async_press()
 
-        assert button.name.endswith("Ошибка")
-        assert button._is_busy is True
+        assert button.name.endswith(module.STATUS_ERROR)
+        assert button.state == module.STATUS_ERROR
+        assert button.available is False
 
         await asyncio.sleep(0)
         await asyncio.sleep(0)
 
         assert button.name == base_name
         assert button._is_busy is False
-        assert button._status_suffix is None
+        assert button.state == module.STATUS_READY
+        assert button.available is True
         assert getattr(button, "_state_write_count", 0) >= 3
 
     with _load_button_module() as module:
@@ -334,7 +371,7 @@ def test_button_ignores_clicks_while_busy(monkeypatch: pytest.MonkeyPatch) -> No
         await asyncio.sleep(0)
         await asyncio.sleep(0)
         assert button._is_busy is False
-        assert button._status_suffix is None
+        assert button.state == module.STATUS_READY
 
     with _load_button_module() as module:
         asyncio.run(_scenario(module))
