@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from custom_components.intersvyaz import async_setup_entry
+from custom_components.intersvyaz.api import RelayInfo, RelayOpener
 from custom_components.intersvyaz.const import (
     CONF_BUYER_ID,
     CONF_CRM_TOKEN,
@@ -29,6 +30,7 @@ from custom_components.intersvyaz.const import (
     DATA_API_CLIENT,
     DATA_CONFIG,
     DATA_COORDINATOR,
+    DATA_DOOR_OPENERS,
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOMAIN,
@@ -89,6 +91,7 @@ class _DummyApiClient:
         self.mobile_token: SimpleNamespace | None = None
         self.crm_token: SimpleNamespace | None = None
         self.async_open_door = AsyncMock()
+        self.async_get_relays = AsyncMock(return_value=[])
 
     def set_mobile_token(self, token: str) -> None:
         self.mobile_token = SimpleNamespace(raw=token)
@@ -112,10 +115,6 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         "custom_components.intersvyaz.async_get_clientsession",
         lambda _hass: object(),
     )
-    monkeypatch.setattr(
-        "custom_components.intersvyaz.IntersvyazApiClient",
-        _DummyApiClient,
-    )
     fake_coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
     monkeypatch.setattr(
         "custom_components.intersvyaz.IntersvyazDataUpdateCoordinator",
@@ -135,9 +134,68 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         }
     )
 
+    main_relay = RelayInfo(
+        address="Главный подъезд",
+        relay_id="1",
+        status_code=None,
+        building_id=None,
+        mac="00:11:22:33:44:55",
+        status_text=None,
+        is_main=True,
+        has_video=False,
+        entrance_uid="uid-main",
+        porch_num="1",
+        relay_type=None,
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=RelayOpener(relay_id=10, relay_num=1, mac="00:11:22:33:44:55"),
+        raw={"ADDRESS": "Главный подъезд"},
+    )
+    shared_relay = RelayInfo(
+        address="Расшаренный подъезд",
+        relay_id="2",
+        status_code=None,
+        building_id=None,
+        mac="AA:BB:CC:DD:EE:FF",
+        status_text=None,
+        is_main=False,
+        has_video=False,
+        entrance_uid="uid-shared",
+        porch_num="2",
+        relay_type=None,
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=RelayOpener(relay_id=20, relay_num=2, mac="AA:BB:CC:DD:EE:FF"),
+        raw={"ADDRESS": "Расшаренный подъезд"},
+    )
+
+    sample_relays = [main_relay, shared_relay]
+
+    created_clients: list[_DummyApiClient] = []
+
+    def _client_factory(*args: Any, **kwargs: Any) -> _DummyApiClient:
+        client = _DummyApiClient(*args, **kwargs)
+        client.async_get_relays.return_value = sample_relays
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.IntersvyazApiClient",
+        _client_factory,
+    )
+
     setup_result = await async_setup_entry(hass, entry)
     assert setup_result is True, "Настройка должна завершиться успехом"
     assert DOMAIN in hass.data, "Интеграция обязана создать пространство данных домена"
+    assert len(created_clients) == 1
     stored = hass.data[DOMAIN][entry.entry_id]
 
     # Проверяем, что все ключевые объекты сохранены для последующего использования.
@@ -146,11 +204,24 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
     assert DATA_CONFIG in stored
     assert callable(stored[DATA_OPEN_DOOR])
 
+    door_openers = stored[DATA_DOOR_OPENERS]
+    assert len(door_openers) == 2, "Ожидаем отдельную кнопку для каждого домофона"
+    assert door_openers[0]["address"] == "Главный подъезд"
+    assert door_openers[1]["address"] == "Расшаренный подъезд"
+
     # Сервис открытия двери должен быть зарегистрирован в Home Assistant.
     assert hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR)
 
     # Запуск колбэка не должен приводить к ошибке и обязан дергать API клиента.
     await stored[DATA_OPEN_DOOR]()
     api_client: _DummyApiClient = stored[DATA_API_CLIENT]
-    api_client.async_open_door.assert_awaited_once_with("00:11:22:33:44:55", 3)
+    api_client.async_open_door.assert_awaited_once_with("00:11:22:33:44:55", 1)
     persist_tokens.assert_awaited_once()
+
+    # Проверяем, что сервис может открыть конкретный расшаренный домофон по uid.
+    service_handler = hass.services._handlers[(DOMAIN, SERVICE_OPEN_DOOR)]
+    shared_uid = door_openers[1]["uid"]
+    await service_handler(SimpleNamespace(data={"entry_id": entry.entry_id, "door_uid": shared_uid}))
+    assert api_client.async_open_door.await_count == 2
+    api_client.async_open_door.assert_called_with("AA:BB:CC:DD:EE:FF", 2)
+    assert persist_tokens.await_count == 2

@@ -114,11 +114,15 @@ def test_integration_importable(repo_root: Path) -> None:
     def _required(key: str) -> str:  # pragma: no cover - заглушка Required
         return key
 
+    def _optional(key: str) -> str:  # pragma: no cover - заглушка Optional
+        return key
+
     def _in(options: object) -> object:  # pragma: no cover - заглушка In
         return options
 
     voluptuous_module.Schema = _Schema  # type: ignore[attr-defined]
     voluptuous_module.Required = _required  # type: ignore[attr-defined]
+    voluptuous_module.Optional = _optional  # type: ignore[attr-defined]
     voluptuous_module.In = _in  # type: ignore[attr-defined]
 
     class _ClientError(Exception):  # pragma: no cover - заглушка aiohttp.ClientError
