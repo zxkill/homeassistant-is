@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 import logging
 from typing import Awaitable, Callable, Optional
 
@@ -10,24 +11,37 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
+from homeassistant.helpers.dispatcher import async_dispatcher_send
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .api import IntersvyazApiError
 from .const import (
+    ATTR_STATUS_BUSY,
+    ATTR_STATUS_CODE,
+    ATTR_STATUS_ERROR,
+    ATTR_STATUS_LABEL,
+    ATTR_STATUS_UPDATED_AT,
     BUTTON_STATUS_RESET_DELAY_SECONDS,
     DATA_COORDINATOR,
     DATA_DOOR_OPENERS,
+    DATA_DOOR_STATUSES,
     DATA_OPEN_DOOR,
     DOMAIN,
+    DOOR_STATUS_ERROR,
+    DOOR_STATUS_LABELS,
+    DOOR_STATUS_OPENED,
+    DOOR_STATUS_OPENING,
+    DOOR_STATUS_READY,
+    SIGNAL_DOOR_STATUS_UPDATED,
 )
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.button")
 
 # Текстовые статусы, которые видит пользователь в интерфейсе Home Assistant.
-STATUS_READY = "Готово"
-STATUS_OPENING = "Открываем…"
-STATUS_OPENED = "Открыто"
-STATUS_ERROR = "Ошибка"
+STATUS_READY = DOOR_STATUS_LABELS[DOOR_STATUS_READY]
+STATUS_OPENING = DOOR_STATUS_LABELS[DOOR_STATUS_OPENING]
+STATUS_OPENED = DOOR_STATUS_LABELS[DOOR_STATUS_OPENED]
+STATUS_ERROR = DOOR_STATUS_LABELS[DOOR_STATUS_ERROR]
 
 
 async def async_setup_entry(
@@ -67,6 +81,7 @@ async def async_setup_entry(
             continue
         buttons.append(
             IntersvyazDoorOpenButton(
+                hass,
                 coordinator,
                 entry,
                 callback,
@@ -87,12 +102,16 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
 
     def __init__(
         self,
+        hass: HomeAssistant,
         coordinator,
         entry: ConfigEntry,
         open_door_callable: Callable[[], Awaitable[None]],
         door_entry: dict,
     ) -> None:
         super().__init__(coordinator)
+        # Сохраняем ссылку на Home Assistant, чтобы публиковать сигналы dispatcher
+        # и синхронизировать состояние с дополнительным сенсором.
+        self._hass = hass
         self._entry = entry
         # Сохраняем вызываемый объект, который отправляет команду открытия домофона.
         self._open_door_callable = open_door_callable
@@ -108,28 +127,37 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
         self._attr_device_info = DeviceInfo(identifiers={(DOMAIN, entry.entry_id)})
         # Флаг, блокирующий повторные нажатия, пока действие выполняется или статус выводится пользователю.
         self._is_busy: bool = False
-        # Храним текущий текстовый статус для отображения в интерфейсе.
-        self._status: str = STATUS_READY
+        # Храним машинный код и человекочитаемую версию статуса отдельно.
+        self._status_code: str = DOOR_STATUS_READY
+        self._status_label: str = STATUS_READY
+        self._status_updated_at: str = datetime.now(timezone.utc).isoformat()
+        self._last_error: Optional[str] = None
         # Асинхронная задача, которая сбрасывает статус после небольшого ожидания.
         self._status_reset_task: Optional[asyncio.Task[None]] = None
         # Изначально кнопка доступна к нажатию, а атрибуты отражают базовое состояние.
         self._attr_available = True
         self._attr_extra_state_attributes = self._compose_state_attributes()
+        # Получаем ссылку на общее хранилище статусов, подготовленное при
+        # настройке интеграции, чтобы сенсор мог прочитать данные сразу после
+        # добавления.
+        entry_storage = hass.data.setdefault(DOMAIN, {}).setdefault(entry.entry_id, {})
+        self._door_statuses = entry_storage.setdefault(DATA_DOOR_STATUSES, {})
+        self._store_status()
 
     @property
     def name(self) -> str | None:
         """Вернуть имя кнопки с учётом динамического статуса."""
 
-        if self._status == STATUS_READY:
+        if self._status_label == STATUS_READY:
             return self._base_name
         # Добавляем понятную подсказку: «Открыть домофон (Адрес) — Открыто/Ошибка/…».
-        return f"{self._base_name} — {self._status}"
+        return f"{self._base_name} — {self._status_label}"
 
     @property
     def state(self) -> str | None:
         """Показываем текущий статус в столбце состояния карточки."""
 
-        return self._status
+        return self._status_label
 
     def _compose_state_attributes(self) -> dict[str, Optional[str] | bool]:
         """Сформировать словарь атрибутов с контекстом домофона и статусом."""
@@ -139,8 +167,11 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
             "door_address": self._door_entry.get("address"),
             "door_mac": self._door_entry.get("mac"),
             "door_id": self._door_entry.get("door_id"),
-            "status": self._status,
-            "busy": self._is_busy,
+            ATTR_STATUS_CODE: self._status_code,
+            ATTR_STATUS_LABEL: self._status_label,
+            ATTR_STATUS_BUSY: self._is_busy,
+            ATTR_STATUS_UPDATED_AT: self._status_updated_at,
+            ATTR_STATUS_ERROR: self._last_error,
         }
 
     async def async_press(self) -> None:
@@ -168,7 +199,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
         )
         # Переводим кнопку в «занято» и уведомляем пользователя о попытке открытия.
         self._cancel_status_reset()
-        self._set_status(STATUS_OPENING, busy=True)
+        self._set_status(DOOR_STATUS_OPENING, busy=True)
         try:
             await self._open_door_callable()
         except IntersvyazApiError as err:
@@ -179,7 +210,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 err,
             )
             # Показываем ошибку пользователю и планируем возврат к исходному состоянию.
-            self._set_status(STATUS_ERROR, busy=True)
+            self._set_status(DOOR_STATUS_ERROR, busy=True, error=str(err))
             self._schedule_status_reset()
             raise
         except Exception as err:  # pragma: no cover - неожиданные ошибки логируем подробно
@@ -189,7 +220,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 self._door_entry.get("uid"),
                 err,
             )
-            self._set_status(STATUS_ERROR, busy=True)
+            self._set_status(DOOR_STATUS_ERROR, busy=True, error=str(err))
             self._schedule_status_reset()
             raise
         _LOGGER.info(
@@ -198,7 +229,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
             self._door_entry.get("uid"),
         )
         # Сообщаем об успешном открытии и возвращаем кнопку в исходное состояние чуть позже.
-        self._set_status(STATUS_OPENED, busy=True)
+        self._set_status(DOOR_STATUS_OPENED, busy=True)
         self._schedule_status_reset()
 
     async def async_will_remove_from_hass(self) -> None:
@@ -206,29 +237,37 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
 
         self._cancel_status_reset(release_busy=True)
         # Возвращаем кнопку в исходное состояние, чтобы при следующем добавлении не мигал старый статус.
-        self._set_status(STATUS_READY, busy=False)
+        self._set_status(DOOR_STATUS_READY, busy=False)
 
-    def _set_status(self, status: str, *, busy: Optional[bool] = None) -> None:
+    def _set_status(
+        self,
+        status_code: str,
+        *,
+        busy: Optional[bool] = None,
+        error: Optional[str] = None,
+    ) -> None:
         """Обновить текущий статус кнопки и синхронизировать его с интерфейсом."""
 
         if busy is not None:
             self._is_busy = busy
-        self._status = status
+        self._status_code = status_code
+        self._status_label = DOOR_STATUS_LABELS.get(status_code, status_code)
         _LOGGER.debug(
             "Обновляем статус кнопки entry_id=%s uid=%s: статус=%s, занятость=%s",
             self._entry.entry_id,
             self._door_entry.get("uid"),
-            status,
+            status_code,
             self._is_busy,
         )
         # Имя кнопки дополняем текущим статусом, чтобы пользователь видел результат прямо на панели.
-        if self._status == STATUS_READY:
+        if self._status_label == STATUS_READY:
             self._attr_name = self._base_name
         else:
-            self._attr_name = f"{self._base_name} — {self._status}"
+            self._attr_name = f"{self._base_name} — {self._status_label}"
         # Пока статус показывается, блокируем повторное нажатие.
         self._attr_available = not self._is_busy
         self._attr_extra_state_attributes = self._compose_state_attributes()
+        self._store_status(error=error)
         self.async_write_ha_state()
 
     def _schedule_status_reset(self) -> None:
@@ -254,7 +293,7 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
                 if cancelled:
                     return
                 # Если таймер завершился без отмены, разблокируем кнопку.
-                self._set_status(STATUS_READY, busy=False)
+                self._set_status(DOOR_STATUS_READY, busy=False)
             self._status_reset_task = None
 
         # Создаём задачу сброса в текущем цикле событий.
@@ -270,3 +309,28 @@ class IntersvyazDoorOpenButton(CoordinatorEntity, ButtonEntity):
         if release_busy:
             self._is_busy = False
             self._attr_available = True
+
+    def _store_status(self, *, error: Optional[str] = None) -> None:
+        """Сохранить статус в общем хранилище и уведомить подписчиков."""
+
+        door_uid = self._door_entry.get("uid")
+        if not door_uid:
+            return
+
+        self._status_updated_at = datetime.now(timezone.utc).isoformat()
+        self._last_error = error if self._status_code == DOOR_STATUS_ERROR else None
+        payload = {
+            ATTR_STATUS_CODE: self._status_code,
+            ATTR_STATUS_LABEL: self._status_label,
+            ATTR_STATUS_BUSY: self._is_busy,
+            ATTR_STATUS_UPDATED_AT: self._status_updated_at,
+            ATTR_STATUS_ERROR: self._last_error,
+        }
+        self._door_statuses[door_uid] = payload
+        async_dispatcher_send(
+            self._hass,
+            SIGNAL_DOOR_STATUS_UPDATED,
+            self._entry.entry_id,
+            door_uid,
+            payload,
+        )

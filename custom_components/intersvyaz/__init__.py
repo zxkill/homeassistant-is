@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import voluptuous as vol
@@ -29,11 +30,19 @@ from .const import (
     DATA_COORDINATOR,
     DATA_DOOR_OPENERS,
     DATA_OPEN_DOOR,
+    DATA_DOOR_STATUSES,
     DEFAULT_BUYER_ID,
     DOMAIN,
     EVENT_DOOR_OPEN_RESULT,
     LOGGER_NAME,
     SERVICE_OPEN_DOOR,
+    DOOR_STATUS_READY,
+    DOOR_STATUS_LABELS,
+    ATTR_STATUS_CODE,
+    ATTR_STATUS_LABEL,
+    ATTR_STATUS_BUSY,
+    ATTR_STATUS_UPDATED_AT,
+    ATTR_STATUS_ERROR,
 )
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
@@ -219,12 +228,30 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     # Сохраняем все вспомогательные сущности в хранилище Home Assistant, чтобы
     # сервисы и другие части интеграции могли безопасно переиспользовать их.
+    # Подготавливаем словарь статусов домофонов. Он используется кнопками и
+    # сенсорами для отображения прогресса открытия, поэтому заполняем его
+    # начальными значениями «Готово» заранее.
+    door_statuses: Dict[str, Dict[str, Any]] = {}
+    now_iso = datetime.now(timezone.utc).isoformat()
+    for door in door_openers:
+        door_uid = door.get("uid")
+        if not door_uid:
+            continue
+        door_statuses[door_uid] = {
+            ATTR_STATUS_CODE: DOOR_STATUS_READY,
+            ATTR_STATUS_LABEL: DOOR_STATUS_LABELS[DOOR_STATUS_READY],
+            ATTR_STATUS_BUSY: False,
+            ATTR_STATUS_UPDATED_AT: now_iso,
+            ATTR_STATUS_ERROR: None,
+        }
+
     hass.data[DOMAIN][entry.entry_id] = {
         DATA_API_CLIENT: api_client,
         DATA_COORDINATOR: coordinator,
         DATA_CONFIG: config_data,
         DATA_OPEN_DOOR: default_entry["callback"],
         DATA_DOOR_OPENERS: door_openers,
+        DATA_DOOR_STATUSES: door_statuses,
     }
 
     _LOGGER.info(
