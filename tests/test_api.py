@@ -5,7 +5,12 @@ import sys
 import types
 
 import pytest
-from aiohttp import ClientSession, web
+
+aiohttp = pytest.importorskip(
+    "aiohttp", reason="Тесты API требуют aiohttp для имитации облака"
+)
+ClientSession = aiohttp.ClientSession
+web = aiohttp.web
 
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "intersvyaz"
 
@@ -27,6 +32,8 @@ sys.modules["custom_components.intersvyaz"] = intersvyaz_module
 API_MODULE = _load_module("custom_components.intersvyaz.api", "api.py")
 IntersvyazApiClient = API_MODULE.IntersvyazApiClient
 IntersvyazApiError = API_MODULE.IntersvyazApiError
+sanitize_request_context = API_MODULE._sanitize_request_context
+mask_string = API_MODULE._mask_string
 
 
 @pytest.fixture
@@ -39,7 +46,80 @@ async def api_server(aiohttp_server):
         "crm_auth_calls": 0,
         "last_confirm_payload": None,
         "last_get_token_payload": None,
-        "relays_requested": 0,
+        "relays_requested": [],
+        "main_relays_payload": [
+            {
+                "ADDRESS": "Москва, ул. Ленина, д. 1, подъезд 1",
+                "RELAY_ID": "50001",
+                "STATUS_CODE": "0",
+                "BUILDING_ID": "300001",
+                "MAC_ADDR": "08:13:CD:00:0D:7F",
+                "STATUS_TEXT": "OK",
+                "IS_MAIN": "1",
+                "HAS_VIDEO": "1",
+                "ENTRANCE_UID": "11111111-2222-3333-4444-555555555555",
+                "PORCH_NUM": "1",
+                "RELAY_TYPE": "Главный вход",
+                "SMART_INTERCOM": "0",
+                "NUM_BUILDING": "1",
+                "IMAGE_URL": "https://td-snapshots.is74.ru/mock.jpg",
+                "LINKS": {"open": "https://td-crm.is74.ru/api/open/08:13:CD:00:0D:7F/1"},
+                "OPENER": {
+                    "type": "crm",
+                    "relay_id": 50001,
+                    "relay_num": 1,
+                    "mac": "08:13:CD:00:0D:7F",
+                },
+            }
+        ],
+        "shared_relays_payload": [
+            {
+                "ADDRESS": "Москва, ул. Садовая, д. 5, подъезд 2",
+                "RELAY_ID": "60001",
+                "STATUS_CODE": "0",
+                "BUILDING_ID": "300002",
+                "MAC_ADDR": "AA:BB:CC:DD:EE:FF",
+                "STATUS_TEXT": "OK",
+                "IS_MAIN": "0",
+                "HAS_VIDEO": "0",
+                "ENTRANCE_UID": "aaaa1111-bbbb-2222-cccc-333333333333",
+                "PORCH_NUM": "2",
+                "RELAY_TYPE": "Гостевой вход",
+                "SMART_INTERCOM": "0",
+                "NUM_BUILDING": "5",
+                "IMAGE_URL": None,
+                "LINKS": {"open": "https://td-crm.is74.ru/api/open/AA:BB:CC:DD:EE:FF/2"},
+                "OPENER": {
+                    "type": "crm",
+                    "relay_id": 60001,
+                    "relay_num": 2,
+                    "mac": "AA:BB:CC:DD:EE:FF",
+                },
+            },
+            {
+                "ADDRESS": "Челябинск, пр. Победы, д. 10, подъезд 3",
+                "RELAY_ID": "60002",
+                "STATUS_CODE": "0",
+                "BUILDING_ID": "300003",
+                "MAC_ADDR": "11:22:33:44:55:66",
+                "STATUS_TEXT": "OK",
+                "IS_MAIN": "0",
+                "HAS_VIDEO": "0",
+                "ENTRANCE_UID": "dddd1111-eeee-2222-ffff-444444444444",
+                "PORCH_NUM": "3",
+                "RELAY_TYPE": "Гостевой вход",
+                "SMART_INTERCOM": "1",
+                "NUM_BUILDING": "10",
+                "IMAGE_URL": None,
+                "LINKS": {"open": "https://td-crm.is74.ru/api/open/11:22:33:44:55:66/3"},
+                "OPENER": {
+                    "type": "crm",
+                    "relay_id": 60002,
+                    "relay_num": 3,
+                    "mac": "11:22:33:44:55:66",
+                },
+            },
+        ],
     }
 
     async def handle_get_confirm(request: web.Request) -> web.Response:
@@ -122,34 +202,16 @@ async def api_server(aiohttp_server):
     async def handle_relays(request: web.Request) -> web.Response:
         if request.headers.get("Authorization") != "Bearer primary-token":
             return web.json_response({"error": "unauthorized"}, status=401)
-        state["relays_requested"] += 1
-        return web.json_response(
-            [
-                {
-                    "ADDRESS": "Москва, ул. Ленина, д. 1, подъезд 1",
-                    "RELAY_ID": "50001",
-                    "STATUS_CODE": "0",
-                    "BUILDING_ID": "300001",
-                    "MAC_ADDR": "08:13:CD:00:0D:7F",
-                    "STATUS_TEXT": "OK",
-                    "IS_MAIN": "1",
-                    "HAS_VIDEO": "1",
-                    "ENTRANCE_UID": "11111111-2222-3333-4444-555555555555",
-                    "PORCH_NUM": "1",
-                    "RELAY_TYPE": "Главный вход",
-                    "SMART_INTERCOM": "0",
-                    "NUM_BUILDING": "1",
-                    "IMAGE_URL": "https://td-snapshots.is74.ru/mock.jpg",
-                    "LINKS": {"open": "https://td-crm.is74.ru/api/open/08:13:CD:00:0D:7F/1"},
-                    "OPENER": {
-                        "type": "crm",
-                        "relay_id": 50001,
-                        "relay_num": 1,
-                        "mac": "08:13:CD:00:0D:7F",
-                    },
-                }
-            ]
-        )
+        is_shared = request.query.get("isShared", "")
+        state["relays_requested"].append(is_shared)
+        if is_shared == "1":
+            return web.json_response(state["shared_relays_payload"])
+        if is_shared == "0":
+            return web.json_response(state["main_relays_payload"])
+        # Если параметр не указан, возвращаем объединённый список для обратной
+        # совместимости с будущими тестами.
+        payload = state["main_relays_payload"] + state["shared_relays_payload"]
+        return web.json_response(payload)
 
     async def handle_token_info(request: web.Request) -> web.Response:
         return web.json_response({"TOKEN": "primary-token"})
@@ -236,12 +298,51 @@ async def test_full_authorization_flow(api_server) -> None:
         assert snapshot["balance"]["blocked"]["text"] == "К оплате"
 
         relays = await client.async_get_relays()
-        assert len(relays) == 1
-        relay = relays[0]
-        assert relay.mac == "08:13:CD:00:0D:7F"
-        assert relay.opener and relay.opener.relay_num == 1
-        assert relay.to_dict()["RELAY_ID"] == "50001"
-        assert api_server.state["relays_requested"] == 1
+        assert len(relays) == 3
+        main_relays = [relay for relay in relays if relay.is_main]
+        shared_relays = [relay for relay in relays if not relay.is_main]
+        assert len(main_relays) == 1
+        assert len(shared_relays) == 2
+        assert main_relays[0].mac == "08:13:CD:00:0D:7F"
+        assert main_relays[0].opener and main_relays[0].opener.relay_num == 1
+        assert shared_relays[0].mac == "AA:BB:CC:DD:EE:FF"
+        assert shared_relays[1].mac == "11:22:33:44:55:66"
+        assert api_server.state["relays_requested"] == ["0", "1"]
+
+
+def test_mask_string_behaviour() -> None:
+    """Строки корректно маскируются для логов, сохраняя подсказку."""
+
+    assert mask_string("1234567890", keep_ends=True) == "12***90"
+    assert mask_string("abcd", keep_ends=False) == "***"
+    assert mask_string("", keep_ends=True) == "***"
+
+
+def test_sanitize_request_context_masks_sensitive_data() -> None:
+    """Контекст запроса не содержит токены и полные телефоны после маскировки."""
+
+    context = {
+        "method": "POST",
+        "url": "https://example/api",
+        "headers": {
+            "Authorization": "Bearer secret-token",
+            "X-Device-Id": "ABCDEF123456",
+        },
+        "json": {
+            "token": "secret-token",
+            "phone": "+79001234567",
+        },
+        "params": {"confirmCode": "1234"},
+    }
+    sanitized = sanitize_request_context(context)
+    assert sanitized["headers"]["Authorization"].startswith("Bearer ")
+    assert sanitized["headers"]["Authorization"].endswith("***")
+    assert sanitized["headers"]["X-Device-Id"].startswith("AB")
+    assert sanitized["headers"]["X-Device-Id"].endswith("56")
+    assert sanitized["json"]["token"] == "***"
+    assert sanitized["json"]["phone"].startswith("+7")
+    assert sanitized["json"]["phone"].endswith("67")
+    assert sanitized["params"]["confirmCode"] == "***"
 
 
 @pytest.mark.asyncio
@@ -258,6 +359,63 @@ async def test_open_door_triggers_crm_auth(api_server) -> None:
         await client.async_open_door("08:53:CD:00:83:4E", 1)
         assert api_server.state["crm_auth_calls"] == 1
         assert api_server.state["door_open_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_get_relays_deduplicates_same_door(api_server) -> None:
+    """Повторяющиеся домофоны из разных выдач объединяются."""
+
+    base_url = str(api_server.make_url(""))
+    # Подготавливаем ситуацию, когда основной домофон дублируется в расшаренном списке.
+    api_server.state["shared_relays_payload"] = [
+        api_server.state["main_relays_payload"][0],
+        {
+            "ADDRESS": "Москва, ул. Новый, д. 2, подъезд 2",
+            "RELAY_ID": "70001",
+            "STATUS_CODE": "0",
+            "BUILDING_ID": "300004",
+            "MAC_ADDR": "22:33:44:55:66:77",
+            "STATUS_TEXT": "OK",
+            "IS_MAIN": "0",
+            "HAS_VIDEO": "0",
+            "ENTRANCE_UID": "99991111-aaaa-2222-bbbb-555555555555",
+            "PORCH_NUM": "2",
+            "RELAY_TYPE": "Гостевой вход",
+            "SMART_INTERCOM": "0",
+            "NUM_BUILDING": "2",
+            "IMAGE_URL": None,
+            "LINKS": {"open": "https://td-crm.is74.ru/api/open/22:33:44:55:66:77/2"},
+            "OPENER": {
+                "type": "crm",
+                "relay_id": 70001,
+                "relay_num": 2,
+                "mac": "22:33:44:55:66:77",
+            },
+        },
+    ]
+
+    async with ClientSession() as session:
+        client = IntersvyazApiClient(
+            session=session,
+            api_base_url=base_url,
+            crm_base_url=base_url,
+            device_id="TEST-DEVICE",
+        )
+
+        confirm = await client.async_request_confirmation("9001112233")
+        check_result = await client.async_check_confirmation("9001112233", "1234")
+        await client.async_get_mobile_token(confirm.auth_id, check_result.addresses[0].user_id)
+
+        relays = await client.async_get_relays()
+        assert len(relays) == 3
+        macs = sorted(relay.mac for relay in relays)
+        assert macs == [
+            "08:13:CD:00:0D:7F",
+            "22:33:44:55:66:77",
+            "AA:BB:CC:DD:EE:FF",
+        ]
+        # Проверяем, что основной домофон не задвоился из-за расшаренного ответа.
+        assert sum(1 for relay in relays if relay.mac == "08:13:CD:00:0D:7F") == 1
 
 
 @pytest.mark.asyncio

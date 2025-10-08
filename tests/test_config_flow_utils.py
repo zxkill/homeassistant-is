@@ -4,6 +4,12 @@ from typing import Any, Dict
 import sys
 import types
 
+import pytest
+
+pytest.importorskip(
+    "voluptuous", reason="Config flow требует voluptuous для валидации форм"
+)
+
 PACKAGE_ROOT = Path(__file__).resolve().parents[1] / "custom_components" / "intersvyaz"
 
 
@@ -90,6 +96,29 @@ def test_build_description_placeholders() -> None:
     assert "Неверный код подтверждения" in placeholders["auth_message"]
 
 
+def test_select_account_placeholders_always_provide_error_key() -> None:
+    """Шаг выбора договора всегда передаёт плейсхолдер ошибки для переводов."""
+
+    flow = CONFIG_FLOW_MODULE.IntersvyazConfigFlow()
+    flow.hass = types.SimpleNamespace(config=types.SimpleNamespace(language="ru-RU"))
+    ConfirmAddress = CONFIG_FLOW_MODULE.ConfirmAddress
+    flow._addresses = [
+        ConfirmAddress(user_id="1", address="г. Челябинск, ул. Примерная, д. 1")
+    ]
+
+    # Без ошибки плейсхолдер должен присутствовать и быть пустой строкой.
+    flow._last_error_message = None
+    result = flow._show_select_account_form()
+    placeholders = result["description_placeholders"]
+    assert placeholders["error_message"] == ""
+
+    # При ошибке плейсхолдер добавляет отступ и сам текст сообщения.
+    flow._last_error_message = "CRM вернула 401"
+    result_with_error = flow._show_select_account_form()
+    placeholders_with_error = result_with_error["description_placeholders"]
+    assert placeholders_with_error["error_message"].strip() == "CRM вернула 401"
+
+
 def test_select_preferred_relay() -> None:
     """Выбор домофона отдаёт приоритет основному входу."""
 
@@ -141,3 +170,93 @@ def test_select_preferred_relay() -> None:
         [secondary_relay, main_relay]
     )
     assert selected is main_relay
+
+
+def test_coerce_buyer_id_logs_warning_for_non_default(caplog: pytest.LogCaptureFixture) -> None:
+    """Любые отличные от единицы кандидаты логируются и заменяются на стандартное значение."""
+
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    MobileToken = CONFIG_FLOW_MODULE.MobileToken
+    relay = RelayInfo(
+        address="Основной вход",
+        relay_id="50001",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    token = MobileToken(
+        token="test-token",
+        user_id=1,
+        profile_id=777,
+        access_begin=None,
+        access_end=None,
+        phone=None,
+        unique_device_id=None,
+        raw={},
+    )
+
+    with caplog.at_level("WARNING"):
+        buyer_id = CONFIG_FLOW_MODULE._coerce_buyer_id(relay, token)
+
+    assert buyer_id == CONFIG_FLOW_MODULE.DEFAULT_BUYER_ID
+    assert "CRM ожидает buyer_id" in caplog.text
+
+
+def test_coerce_buyer_id_debugs_when_candidates_already_default(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Если API даёт единицу, фиксируем это в debug-логе для диагностики."""
+
+    RelayInfo = CONFIG_FLOW_MODULE.RelayInfo
+    MobileToken = CONFIG_FLOW_MODULE.MobileToken
+    relay = RelayInfo(
+        address="Основной вход",
+        relay_id="1",
+        status_code="0",
+        building_id=None,
+        mac="08:13:CD:00:0D:7A",
+        status_text="OK",
+        is_main=True,
+        has_video=True,
+        entrance_uid=None,
+        porch_num="1",
+        relay_type="Главный",
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url=None,
+        open_link=None,
+        opener=None,
+        raw={},
+    )
+    token = MobileToken(
+        token="test-token",
+        user_id=1,
+        profile_id=1,
+        access_begin=None,
+        access_end=None,
+        phone=None,
+        unique_device_id=None,
+        raw={},
+    )
+
+    with caplog.at_level("DEBUG"):
+        buyer_id = CONFIG_FLOW_MODULE._coerce_buyer_id(relay, token)
+
+    assert buyer_id == CONFIG_FLOW_MODULE.DEFAULT_BUYER_ID
+    assert "CRM использует buyer_id" in caplog.text

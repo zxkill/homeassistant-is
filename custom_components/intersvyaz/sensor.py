@@ -4,9 +4,9 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from homeassistant import const as ha_const
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CURRENCY_RUB
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -15,6 +15,35 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DATA_COORDINATOR, DATA_CONFIG, DOMAIN
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.sensor")
+
+
+def _resolve_balance_unit() -> Any:
+    """Определить единицу измерения баланса с учетом версии Home Assistant."""
+
+    # В новых релизах Home Assistant денежные единицы представлены перечислением
+    # UnitOfCurrency. Мы используем его при наличии, чтобы сохранить типобезопасность
+    # и корректное отображение в интерфейсе.
+    if hasattr(ha_const, "UnitOfCurrency"):
+        ruble_unit = ha_const.UnitOfCurrency.RUBLE
+        _LOGGER.debug(
+            "Используем перечисление UnitOfCurrency.RUBLE для отображения баланса",
+        )
+        return ruble_unit
+
+    # Старые релизы предоставляют строковую константу CURRENCY_RUB. Если её нет,
+    # подставляем код RUB, чтобы не допустить падение интеграции и сохранить
+    # читабельный вывод в интерфейсе.
+    legacy_unit = getattr(ha_const, "CURRENCY_RUB", "RUB")
+    _LOGGER.debug(
+        "Используем строковую единицу измерения %s из homeassistant.const",
+        legacy_unit,
+    )
+    return legacy_unit
+
+
+# Фиксируем выбранную единицу измерения один раз при импортировании модуля, чтобы
+# сенсоры не выполняли повторных проверок и логов при каждом обновлении.
+BALANCE_UNIT = _resolve_balance_unit()
 
 
 async def async_setup_entry(
@@ -29,6 +58,12 @@ async def async_setup_entry(
         IntersvyazBalanceSensor(coordinator, entry),
         IntersvyazProfileSensor(coordinator, entry),
     ]
+    _LOGGER.debug(
+        "Добавляем %d сенсора для записи %s: %s",
+        len(sensors),
+        entry.entry_id,
+        [sensor.__class__.__name__ for sensor in sensors],
+    )
     async_add_entities(sensors, update_before_add=True)
 
 
@@ -73,7 +108,9 @@ class IntersvyazBalanceSensor(IntersvyazBaseSensor):
         self._attr_unique_id = f"{entry.entry_id}_balance"
         self._attr_device_class = SensorDeviceClass.MONETARY
         self._attr_state_class = SensorStateClass.MEASUREMENT
-        self._attr_native_unit_of_measurement = CURRENCY_RUB
+        # Используем ранее вычисленную единицу измерения, чтобы корректно
+        # отображать валюту в UI независимо от версии Home Assistant.
+        self._attr_native_unit_of_measurement = BALANCE_UNIT
 
     @property
     def native_value(self) -> float | None:

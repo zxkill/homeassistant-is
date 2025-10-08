@@ -235,15 +235,9 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._relay_payload = relay.to_dict()
         self._selected_relay = relay
 
-        # В некоторых городах `RELAY_ID` совпадает с buyerId, поэтому пробуем использовать его,
-        # а в качестве безопасного значения подставляем profile_id из мобильного токена.
-        if relay.relay_id:
-            try:
-                self._buyer_id = int(relay.relay_id)
-            except ValueError:
-                self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
-        else:
-            self._buyer_id = self._mobile_token.profile_id or DEFAULT_BUYER_ID
+        # В некоторых городах `RELAY_ID` совпадает с buyerId. Чтобы исключить ошибки 401,
+        # приводим все идентификаторы к int и подставляем профайл либо дефолт как запасной.
+        self._buyer_id = _coerce_buyer_id(relay, self._mobile_token)
 
         _LOGGER.info(
             "Выбран домофон %s (mac=%s, relay_num=%s, buyer_id=%s)",
@@ -327,8 +321,14 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         options = {address.user_id: address.address for address in self._addresses}
         schema = vol.Schema({vol.Required("user_id"): vol.In(options)})
         placeholders = {"addresses": "\n".join(options.values())}
+        # Даже при отсутствии ошибок Home Assistant должен получить плейсхолдер
+        # `error_message`, иначе перевод рухнет с KeyError. Поэтому всегда
+        # передаём строку, дополняя её текстом ошибки и отступами только при
+        # необходимости, чтобы описание оставалось читабельным.
         if self._last_error_message:
-            placeholders["error_message"] = self._last_error_message
+            placeholders["error_message"] = f"\n\n{self._last_error_message}"
+        else:
+            placeholders["error_message"] = ""
         return self.async_show_form(
             step_id="select_account",
             data_schema=schema,
@@ -383,4 +383,42 @@ def _datetime_to_iso(value) -> Optional[str]:
     if value is None:
         return None
     return value.isoformat()
+
+
+def _coerce_buyer_id(relay: Optional[RelayInfo], token: Optional[MobileToken]) -> int:
+    """Форсировать buyerId=1 для CRM, логируя отличия кандидатов."""
+
+    candidates: List[Any] = []
+    if relay and relay.relay_id:
+        candidates.append(relay.relay_id)
+    if token and token.profile_id is not None:
+        candidates.append(token.profile_id)
+
+    normalized_candidates: List[int] = []
+    for candidate in candidates:
+        try:
+            # CRM ожидает единицу, но мы собираем числовые значения для диагностики.
+            normalized_candidates.append(int(candidate))
+        except (TypeError, ValueError):
+            _LOGGER.debug(
+                "Не удалось преобразовать candidate=%s в buyer_id, пропускаем", candidate
+            )
+
+    if normalized_candidates and any(
+        candidate != DEFAULT_BUYER_ID for candidate in normalized_candidates
+    ):
+        # CRM возвращает 401 при любых значениях, кроме 1, поэтому принудительно подменяем.
+        _LOGGER.warning(
+            "CRM ожидает buyer_id=%s, но API предложило %s — используем значение по умолчанию",
+            DEFAULT_BUYER_ID,
+            normalized_candidates,
+        )
+    else:
+        _LOGGER.debug(
+            "CRM использует buyer_id=%s, кандидаты=%s",
+            DEFAULT_BUYER_ID,
+            normalized_candidates or candidates,
+        )
+
+    return DEFAULT_BUYER_ID
 

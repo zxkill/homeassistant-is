@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -32,6 +33,22 @@ from .const import (
 )
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.api")
+
+# Набор ключей, которые необходимо маскировать полностью при логировании.
+_FULL_MASK_KEYS = {
+    "token",
+    "confirmcode",
+    "code",
+    "password",
+    "authid",
+}
+
+# Набор ключей, которые удобнее показывать частично (например, телефон или device_id).
+_PARTIAL_MASK_KEYS = {
+    "phone",
+    "x-device-id",
+    "unique_device_id",
+}
 
 
 @dataclass
@@ -181,6 +198,68 @@ class RelayInfo:
         return normalized
 
 
+def _mask_string(value: str, *, keep_ends: bool) -> str:
+    """Скрыть часть строкового значения, сохранив подсказку для отладки."""
+
+    if not value:
+        return "***"
+    if not keep_ends or len(value) <= 4:
+        return "***"
+    return f"{value[:2]}***{value[-2:]}"
+
+
+def _sanitize_value(key: str, value: Any) -> Any:
+    """Рекурсивно маскировать конфиденциальные данные в структуре запроса."""
+
+    lowered_key = key.lower()
+    if isinstance(value, dict):
+        return {k: _sanitize_value(k, v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_sanitize_value(key, item) for item in value]
+    if lowered_key in _FULL_MASK_KEYS:
+        if isinstance(value, str):
+            return _mask_string(value, keep_ends=False)
+        return "***"
+    if lowered_key in _PARTIAL_MASK_KEYS:
+        if isinstance(value, str):
+            return _mask_string(value, keep_ends=True)
+        if isinstance(value, (int, float)):
+            # Для числовых значений телефонов возвращаем последние цифры.
+            stringified = str(value)
+            return _mask_string(stringified, keep_ends=True)
+        return "***"
+    if lowered_key == "authorization" and isinstance(value, str):
+        # Авторизационный заголовок имеет формат "Bearer <токен>",
+        # поэтому маскируем только секретную часть.
+        parts = value.split(" ", 1)
+        if len(parts) == 2:
+            return f"{parts[0]} {_mask_string(parts[1], keep_ends=False)}"
+        return _mask_string(value, keep_ends=False)
+    return value
+
+
+def _sanitize_request_context(context: Dict[str, Any]) -> Dict[str, Any]:
+    """Создать безопасную копию контекста запроса для логирования."""
+
+    sanitized = deepcopy(context)
+    if "headers" in sanitized and isinstance(sanitized["headers"], dict):
+        sanitized["headers"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["headers"].items()
+        }
+    if "json" in sanitized and isinstance(sanitized["json"], dict):
+        sanitized["json"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["json"].items()
+        }
+    if "params" in sanitized and isinstance(sanitized["params"], dict):
+        sanitized["params"] = {
+            key: _sanitize_value(key, value)
+            for key, value in sanitized["params"].items()
+        }
+    return sanitized
+
+
 def generate_device_id() -> str:
     """Сгенерировать псевдо-уникальный идентификатор устройства."""
 
@@ -223,6 +302,8 @@ class IntersvyazApiClient:
         # Состояние текущей авторизации.
         self._mobile_token: Optional[MobileToken] = None
         self._crm_token: Optional[CrmToken] = None
+        # Сохраняем последний отправленный запрос, чтобы вывести его при ошибке.
+        self._last_request_context: Optional[Dict[str, Any]] = None
 
         _LOGGER.debug(
             "Создан клиент Intersvyaz: api_base_url=%s, crm_base_url=%s, device_id=%s",
@@ -375,26 +456,105 @@ class IntersvyazApiClient:
         pagination: int = 1,
         page_size: int = 30,
         main_first: int = 1,
-        is_shared: int = 1,
+        include_main: bool = True,
+        include_shared: bool = True,
     ) -> List[RelayInfo]:
         """Получить перечень домофонов, доступных пользователю."""
+
+        # Домофоны делятся на «основные» (isShared=0) и «расшаренные» (isShared=1).
+        # Чтобы пользователь увидел полный список адресов, необходимо запросить
+        # обе категории по отдельности и объединить результат вручную.
+        if not include_main and not include_shared:
+            _LOGGER.warning(
+                "Переданы флаги include_main=%s и include_shared=%s, перечень домофонов "
+                "будет пустым.",
+                include_main,
+                include_shared,
+            )
+            return []
 
         self._ensure_mobile_token()
         headers = self._build_mobile_headers(accept_version="v2", include_bearer=True)
         if self._mobile_token and self._mobile_token.profile_id:
             headers["X-api-profile-id"] = str(self._mobile_token.profile_id)
+
+        batches: List[RelayInfo] = []
+        seen_relays: set[tuple[Any, ...]] = set()
+
+        async def _collect_batch(is_shared: int, label: str) -> None:
+            """Выполнить запрос конкретной категории домофонов и накопить результат."""
+
+            try:
+                batch = await self._async_fetch_relays_batch(
+                    headers=headers,
+                    pagination=pagination,
+                    page_size=page_size,
+                    main_first=main_first,
+                    is_shared=is_shared,
+                    label=label,
+                )
+            except IntersvyazApiError as err:
+                _LOGGER.warning(
+                    "Не удалось получить %s домофоны: %s",
+                    label,
+                    err,
+                )
+                return
+
+            for relay in batch:
+                dedupe_key = (
+                    (relay.entrance_uid or "").lower(),
+                    (relay.mac or "").upper(),
+                    getattr(getattr(relay, "opener", None), "relay_id", None),
+                    getattr(getattr(relay, "opener", None), "relay_num", None),
+                )
+                if dedupe_key in seen_relays:
+                    _LOGGER.debug(
+                        "Пропускаем дублирующийся домофон is_shared=%s: %s",
+                        is_shared,
+                        relay.to_dict(),
+                    )
+                    continue
+                seen_relays.add(dedupe_key)
+                batches.append(relay)
+
+        if include_main:
+            await _collect_batch(0, "основные")
+        if include_shared:
+            await _collect_batch(1, "расшаренные")
+
+        _LOGGER.info(
+            "Собрано %s уникальных домофонов (main=%s, shared=%s)",
+            len(batches),
+            include_main,
+            include_shared,
+        )
+        return batches
+
+    async def _async_fetch_relays_batch(
+        self,
+        *,
+        headers: Dict[str, str],
+        pagination: int,
+        page_size: int,
+        main_first: int,
+        is_shared: int,
+        label: str,
+    ) -> List[RelayInfo]:
+        """Запросить и разобрать список домофонов конкретного типа."""
+
         params = {
             "pagination": pagination,
             "pageSize": page_size,
             "mainFirst": main_first,
             "isShared": is_shared,
         }
-        # Параметры соответствуют запросу мобильного приложения и позволяют получить
-        # список как основных, так и расшаренных домофонов.
         _LOGGER.info(
-            "Запрашиваем список домофонов: pagination=%s pageSize=%s",
+            "Запрашиваем %s домофоны: pagination=%s pageSize=%s isShared=%s",
+            label,
             pagination,
             page_size,
+            is_shared,
         )
         response = await self._request_mobile(
             "GET",
@@ -404,17 +564,31 @@ class IntersvyazApiClient:
             accept_version="v2",
         )
         if not isinstance(response, list):
-            _LOGGER.error("Ответ на список домофонов имеет неверный формат: %s", response)
+            _LOGGER.error(
+                "Ответ на список %s домофонов имеет неверный формат: %s",
+                label,
+                response,
+            )
             raise IntersvyazApiError(
                 "API вернуло неожиданный ответ при получении списка домофонов"
             )
+
         relays: List[RelayInfo] = []
         for item in response:
             if not isinstance(item, dict):
-                _LOGGER.debug("Пропускаем некорректный элемент домофона: %s", item)
+                _LOGGER.debug(
+                    "Пропускаем некорректный элемент в списке %s домофонов: %s",
+                    label,
+                    item,
+                )
                 continue
             relays.append(self._parse_relay_info(item))
-        _LOGGER.debug("Получено %s домофонов", len(relays))
+
+        _LOGGER.debug(
+            "Получено %s домофонов категории %s",
+            len(relays),
+            label,
+        )
         return relays
 
     async def async_open_door(self, mac: str, door_id: int) -> None:
@@ -516,6 +690,10 @@ class IntersvyazApiClient:
         """Обновить идентификатор покупателя для CRM запросов."""
 
         self._buyer_id = buyer_id
+        _LOGGER.info(
+            "CRM идентификатор покупателя обновлён на %s для последующих запросов",
+            buyer_id,
+        )
 
     # ------------------------------------------------------------------
     # Внутренние утилиты
@@ -647,13 +825,17 @@ class IntersvyazApiClient:
         """Универсальная обёртка над HTTP-запросом."""
 
         url = f"{base_url}{endpoint}"
+        request_context = {
+            "method": method,
+            "url": url,
+            "headers": headers,
+            "json": json or {},
+            "params": params or {},
+        }
+        self._last_request_context = _sanitize_request_context(request_context)
         _LOGGER.debug(
-            "Запрос %s %s: headers=%s json=%s params=%s",
-            method,
-            url,
-            headers,
-            json,
-            params,
+            "Готовим запрос к API: %s",
+            self._last_request_context,
         )
         try:
             async with asyncio.timeout(self._timeout):
@@ -678,7 +860,10 @@ class IntersvyazApiClient:
         text = await response.text()
         if response.status >= 400:
             _LOGGER.error(
-                "Сервер вернул ошибку %s: %s", response.status, text
+                "Сервер вернул ошибку %s: %s. Контекст запроса: %s",
+                response.status,
+                text,
+                self._last_request_context,
             )
             raise IntersvyazApiError(
                 f"API вернуло ошибку {response.status}: {text}"

@@ -6,6 +6,7 @@ DATA_API_CLIENT = "api_client"
 DATA_CONFIG = "config"
 DATA_COORDINATOR = "coordinator"
 DATA_OPEN_DOOR = "open_door"
+DATA_DOOR_OPENERS = "door_openers"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
