@@ -456,26 +456,105 @@ class IntersvyazApiClient:
         pagination: int = 1,
         page_size: int = 30,
         main_first: int = 1,
-        is_shared: int = 1,
+        include_main: bool = True,
+        include_shared: bool = True,
     ) -> List[RelayInfo]:
         """Получить перечень домофонов, доступных пользователю."""
+
+        # Домофоны делятся на «основные» (isShared=0) и «расшаренные» (isShared=1).
+        # Чтобы пользователь увидел полный список адресов, необходимо запросить
+        # обе категории по отдельности и объединить результат вручную.
+        if not include_main and not include_shared:
+            _LOGGER.warning(
+                "Переданы флаги include_main=%s и include_shared=%s, перечень домофонов "
+                "будет пустым.",
+                include_main,
+                include_shared,
+            )
+            return []
 
         self._ensure_mobile_token()
         headers = self._build_mobile_headers(accept_version="v2", include_bearer=True)
         if self._mobile_token and self._mobile_token.profile_id:
             headers["X-api-profile-id"] = str(self._mobile_token.profile_id)
+
+        batches: List[RelayInfo] = []
+        seen_relays: set[tuple[Any, ...]] = set()
+
+        async def _collect_batch(is_shared: int, label: str) -> None:
+            """Выполнить запрос конкретной категории домофонов и накопить результат."""
+
+            try:
+                batch = await self._async_fetch_relays_batch(
+                    headers=headers,
+                    pagination=pagination,
+                    page_size=page_size,
+                    main_first=main_first,
+                    is_shared=is_shared,
+                    label=label,
+                )
+            except IntersvyazApiError as err:
+                _LOGGER.warning(
+                    "Не удалось получить %s домофоны: %s",
+                    label,
+                    err,
+                )
+                return
+
+            for relay in batch:
+                dedupe_key = (
+                    (relay.entrance_uid or "").lower(),
+                    (relay.mac or "").upper(),
+                    getattr(getattr(relay, "opener", None), "relay_id", None),
+                    getattr(getattr(relay, "opener", None), "relay_num", None),
+                )
+                if dedupe_key in seen_relays:
+                    _LOGGER.debug(
+                        "Пропускаем дублирующийся домофон is_shared=%s: %s",
+                        is_shared,
+                        relay.to_dict(),
+                    )
+                    continue
+                seen_relays.add(dedupe_key)
+                batches.append(relay)
+
+        if include_main:
+            await _collect_batch(0, "основные")
+        if include_shared:
+            await _collect_batch(1, "расшаренные")
+
+        _LOGGER.info(
+            "Собрано %s уникальных домофонов (main=%s, shared=%s)",
+            len(batches),
+            include_main,
+            include_shared,
+        )
+        return batches
+
+    async def _async_fetch_relays_batch(
+        self,
+        *,
+        headers: Dict[str, str],
+        pagination: int,
+        page_size: int,
+        main_first: int,
+        is_shared: int,
+        label: str,
+    ) -> List[RelayInfo]:
+        """Запросить и разобрать список домофонов конкретного типа."""
+
         params = {
             "pagination": pagination,
             "pageSize": page_size,
             "mainFirst": main_first,
             "isShared": is_shared,
         }
-        # Параметры соответствуют запросу мобильного приложения и позволяют получить
-        # список как основных, так и расшаренных домофонов.
         _LOGGER.info(
-            "Запрашиваем список домофонов: pagination=%s pageSize=%s",
+            "Запрашиваем %s домофоны: pagination=%s pageSize=%s isShared=%s",
+            label,
             pagination,
             page_size,
+            is_shared,
         )
         response = await self._request_mobile(
             "GET",
@@ -485,17 +564,31 @@ class IntersvyazApiClient:
             accept_version="v2",
         )
         if not isinstance(response, list):
-            _LOGGER.error("Ответ на список домофонов имеет неверный формат: %s", response)
+            _LOGGER.error(
+                "Ответ на список %s домофонов имеет неверный формат: %s",
+                label,
+                response,
+            )
             raise IntersvyazApiError(
                 "API вернуло неожиданный ответ при получении списка домофонов"
             )
+
         relays: List[RelayInfo] = []
         for item in response:
             if not isinstance(item, dict):
-                _LOGGER.debug("Пропускаем некорректный элемент домофона: %s", item)
+                _LOGGER.debug(
+                    "Пропускаем некорректный элемент в списке %s домофонов: %s",
+                    label,
+                    item,
+                )
                 continue
             relays.append(self._parse_relay_info(item))
-        _LOGGER.debug("Получено %s домофонов", len(relays))
+
+        _LOGGER.debug(
+            "Получено %s домофонов категории %s",
+            len(relays),
+            label,
+        )
         return relays
 
     async def async_open_door(self, mac: str, door_id: int) -> None:
