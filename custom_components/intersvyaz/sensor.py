@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from homeassistant import const as ha_const
-from homeassistant.components.sensor import SensorDeviceClass, SensorEntity, SensorStateClass
+from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
@@ -107,7 +107,11 @@ class IntersvyazBalanceSensor(IntersvyazBaseSensor):
         self._attr_name = "Баланс"
         self._attr_unique_id = f"{entry.entry_id}_balance"
         self._attr_device_class = SensorDeviceClass.MONETARY
-        self._attr_state_class = SensorStateClass.MEASUREMENT
+        # Home Assistant запрещает сочетать денежный класс с state_class
+        # "measurement", поэтому явно обнуляем state_class. Так мы избегаем
+        # предупреждений регистратора и подчеркиваем, что значение баланса
+        # может как уменьшаться, так и увеличиваться.
+        self._attr_state_class = None
         # Используем ранее вычисленную единицу измерения, чтобы корректно
         # отображать валюту в UI независимо от версии Home Assistant.
         self._attr_native_unit_of_measurement = BALANCE_UNIT
