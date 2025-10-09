@@ -7,6 +7,8 @@ DATA_CONFIG = "config"
 DATA_COORDINATOR = "coordinator"
 DATA_OPEN_DOOR = "open_door"
 DATA_DOOR_OPENERS = "door_openers"
+DATA_DOOR_REFRESH_UNSUB = "door_refresh_unsub"
+DATA_FACE_MANAGER = "face_manager"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
@@ -36,9 +38,15 @@ DEFAULT_BUYER_ID = 1
 DEFAULT_TIMEOUT = 30
 TOKEN_EXPIRATION_MARGIN = 60
 DEFAULT_UPDATE_INTERVAL_MINUTES = 10
+DOOR_LINK_REFRESH_INTERVAL_HOURS = 6
+CAMERA_FRAME_INTERVAL_SECONDS = 5
+FACE_RECOGNITION_DISTANCE_THRESHOLD = 0.6
+FACE_RECOGNITION_COOLDOWN_SECONDS = 30
 
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
+SERVICE_ADD_KNOWN_FACE = "add_known_face"
+SERVICE_REMOVE_KNOWN_FACE = "remove_known_face"
 
 # Ключи данных для конфигурации и состояний токенов
 CONF_PHONE_NUMBER = "phone_number"
@@ -61,6 +69,11 @@ CONF_DOOR_ADDRESS = "door_address"
 CONF_DOOR_HAS_VIDEO = "door_has_video"
 CONF_DOOR_IMAGE_URL = "door_image_url"
 CONF_ENTRANCE_UID = "entrance_uid"
+CONF_DOOR_OPEN_LINK = "door_open_link"
+CONF_KNOWN_FACES = "known_faces"
+CONF_FACE_NAME = "face_name"
+CONF_FACE_ENCODING = "face_encoding"
+CONF_FACE_IMAGE = "face_image"
 
 # Заголовки
 HEADER_AUTHORIZATION = "Authorization"

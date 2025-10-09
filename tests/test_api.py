@@ -290,9 +290,6 @@ async def test_full_authorization_flow(api_server) -> None:
         crm_token = await client.async_authenticate_crm(1)
         assert crm_token.token == "crm-token"
 
-        await client.async_open_door("08:53:CD:00:83:4E", 1)
-        assert api_server.state["door_open_calls"] == 1
-
         snapshot = await client.async_fetch_account_snapshot()
         assert snapshot["user"]["USER_ID"] == 1000001
         assert snapshot["balance"]["blocked"]["text"] == "К оплате"
@@ -305,9 +302,17 @@ async def test_full_authorization_flow(api_server) -> None:
         assert len(shared_relays) == 2
         assert main_relays[0].mac == "08:13:CD:00:0D:7F"
         assert main_relays[0].opener and main_relays[0].opener.relay_num == 1
+        assert main_relays[0].open_link
         assert shared_relays[0].mac == "AA:BB:CC:DD:EE:FF"
         assert shared_relays[1].mac == "11:22:33:44:55:66"
         assert api_server.state["relays_requested"] == ["0", "1"]
+
+        await client.async_open_door(
+            main_relays[0].mac,
+            main_relays[0].opener.relay_num,
+            open_link=main_relays[0].open_link,
+        )
+        assert api_server.state["door_open_calls"] == 1
 
 
 def test_mask_string_behaviour() -> None:
@@ -356,7 +361,13 @@ async def test_open_door_triggers_crm_auth(api_server) -> None:
         check_result = await client.async_check_confirmation("9001112233", "1234")
         await client.async_get_mobile_token(check_result.auth_id, check_result.addresses[0].user_id)
 
-        await client.async_open_door("08:53:CD:00:83:4E", 1)
+        relays = await client.async_get_relays()
+        relay = relays[0]
+        await client.async_open_door(
+            relay.mac,
+            relay.opener.relay_num,
+            open_link=relay.open_link,
+        )
         assert api_server.state["crm_auth_calls"] == 1
         assert api_server.state["door_open_calls"] == 1
 

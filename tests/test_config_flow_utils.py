@@ -31,10 +31,31 @@ helpers_module = types.ModuleType("homeassistant.helpers")
 core_module = types.ModuleType("homeassistant.core")
 data_entry_flow_module = types.ModuleType("homeassistant.data_entry_flow")
 aiohttp_client_module = types.ModuleType("homeassistant.helpers.aiohttp_client")
+selector_module = types.ModuleType("homeassistant.helpers.selector")
 
 
-class _DummyConfigFlow:
+class _FlowMixin:
+    """Базовые методы, имитирующие поведение FlowHandler Home Assistant."""
+
+    def async_show_form(self, **kwargs: Any) -> Dict[str, Any]:
+        return {"type": "form", **kwargs}
+
+    def async_show_menu(self, **kwargs: Any) -> Dict[str, Any]:
+        return {"type": "menu", **kwargs}
+
+    def async_create_entry(self, **kwargs: Any) -> Dict[str, Any]:
+        return {"type": "create_entry", **kwargs}
+
+
+class _DummyConfigFlow(_FlowMixin):
     """Минимальная заглушка ConfigFlow."""
+
+    def __init_subclass__(cls, **kwargs):  # type: ignore[override]
+        super().__init_subclass__()
+
+
+class _DummyOptionsFlow(_FlowMixin):
+    """Минимальная заглушка OptionsFlow."""
 
     def __init_subclass__(cls, **kwargs):  # type: ignore[override]
         super().__init_subclass__()
@@ -48,11 +69,41 @@ def _async_get_clientsession(_hass: Any) -> Any:  # pragma: no cover
     raise RuntimeError("aiohttp клиент не используется в юнит-тестах")
 
 
+async def _async_return(value: Any) -> Any:
+    """Асинхронный помощник для имитации UploadFile.async_read."""
+
+    return value
+
+
 data_entry_flow_module.FlowResult = Dict[str, Any]
+data_entry_flow_module.UploadFile = type(
+    "UploadFile",
+    (),
+    {
+        "__init__": lambda self, data: setattr(self, "_data", data),
+        "async_read": lambda self: _async_return(getattr(self, "_data", b"")),
+    },
+)
+config_entries_module.OptionsFlow = _DummyOptionsFlow
 config_entries_module.ConfigFlow = _DummyConfigFlow
 core_module.callback = _callback
 helpers_module.aiohttp_client = aiohttp_client_module
 aiohttp_client_module.async_get_clientsession = _async_get_clientsession
+selector_module.FileSelectorConfig = type(
+    "FileSelectorConfig",
+    (),
+    {
+        "__init__": lambda self, **kwargs: setattr(self, "config", kwargs),
+    },
+)
+selector_module.FileSelector = type(
+    "FileSelector",
+    (),
+    {
+        "__init__": lambda self, config: setattr(self, "config", config),
+    },
+)
+helpers_module.selector = selector_module
 
 homeassistant_module.config_entries = config_entries_module
 homeassistant_module.core = core_module
@@ -62,6 +113,7 @@ homeassistant_module.helpers = helpers_module
 sys.modules.setdefault("homeassistant", homeassistant_module)
 sys.modules.setdefault("homeassistant.config_entries", config_entries_module)
 sys.modules.setdefault("homeassistant.helpers", helpers_module)
+sys.modules.setdefault("homeassistant.helpers.selector", selector_module)
 sys.modules.setdefault("homeassistant.core", core_module)
 sys.modules.setdefault("homeassistant.data_entry_flow", data_entry_flow_module)
 sys.modules.setdefault("homeassistant.helpers.aiohttp_client", aiohttp_client_module)

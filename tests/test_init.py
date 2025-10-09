@@ -24,18 +24,28 @@ from custom_components.intersvyaz.const import (
     CONF_BUYER_ID,
     CONF_CRM_TOKEN,
     CONF_DEVICE_ID,
+    CONF_DOOR_ADDRESS,
     CONF_DOOR_ENTRANCE,
+    CONF_DOOR_HAS_VIDEO,
+    CONF_DOOR_IMAGE_URL,
     CONF_DOOR_MAC,
+    CONF_DOOR_OPEN_LINK,
     CONF_MOBILE_TOKEN,
     DATA_API_CLIENT,
     DATA_CONFIG,
     DATA_COORDINATOR,
     DATA_DOOR_OPENERS,
+    DATA_DOOR_REFRESH_UNSUB,
+    DATA_FACE_MANAGER,
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
+    DOOR_LINK_REFRESH_INTERVAL_HOURS,
     DOMAIN,
+    SERVICE_ADD_KNOWN_FACE,
     SERVICE_OPEN_DOOR,
+    SERVICE_REMOVE_KNOWN_FACE,
 )
+from custom_components.intersvyaz.face_manager import FaceRecognitionManager
 
 
 class _DummyEntry:
@@ -44,6 +54,7 @@ class _DummyEntry:
     def __init__(self, data: dict[str, Any]) -> None:
         self.entry_id = "test-entry"
         self.data = data
+        self.options: dict[str, Any] = {}
 
 
 class _DummyServices:
@@ -115,6 +126,20 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         "custom_components.intersvyaz.async_get_clientsession",
         lambda _hass: object(),
     )
+    scheduled_intervals: list[Any] = []
+
+    def _fake_track_time_interval(hass: Any, action: Callable[..., Any], interval: Any) -> Callable[[], None]:
+        scheduled_intervals.append(interval)
+
+        def _cancel() -> None:
+            scheduled_intervals.append("cancelled")
+
+        return _cancel
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.async_track_time_interval",
+        _fake_track_time_interval,
+    )
     fake_coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
     monkeypatch.setattr(
         "custom_components.intersvyaz.IntersvyazDataUpdateCoordinator",
@@ -142,7 +167,7 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         mac="00:11:22:33:44:55",
         status_text=None,
         is_main=True,
-        has_video=False,
+        has_video=True,
         entrance_uid="uid-main",
         porch_num="1",
         relay_type=None,
@@ -150,8 +175,8 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         smart_intercom=None,
         num_building=None,
         letter_building=None,
-        image_url=None,
-        open_link=None,
+        image_url="https://snapshots.example/main.jpg",
+        open_link="https://td-crm.is74.ru/api/open/main",
         opener=RelayOpener(relay_id=10, relay_num=1, mac="00:11:22:33:44:55"),
         raw={"ADDRESS": "Главный подъезд"},
     )
@@ -172,7 +197,7 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
         num_building=None,
         letter_building=None,
         image_url=None,
-        open_link=None,
+        open_link="https://td-crm.is74.ru/api/open/shared",
         opener=RelayOpener(relay_id=20, relay_num=2, mac="AA:BB:CC:DD:EE:FF"),
         raw={"ADDRESS": "Расшаренный подъезд"},
     )
@@ -203,19 +228,28 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
     assert DATA_COORDINATOR in stored
     assert DATA_CONFIG in stored
     assert callable(stored[DATA_OPEN_DOOR])
+    assert isinstance(stored[DATA_FACE_MANAGER], FaceRecognitionManager)
 
     door_openers = stored[DATA_DOOR_OPENERS]
     assert len(door_openers) == 2, "Ожидаем отдельную кнопку для каждого домофона"
     assert door_openers[0]["address"] == "Главный подъезд"
     assert door_openers[1]["address"] == "Расшаренный подъезд"
+    assert door_openers[0]["open_link"] == "https://td-crm.is74.ru/api/open/main"
+    assert door_openers[0]["image_url"] == "https://snapshots.example/main.jpg"
 
     # Сервис открытия двери должен быть зарегистрирован в Home Assistant.
     assert hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR)
+    assert hass.services.has_service(DOMAIN, SERVICE_ADD_KNOWN_FACE)
+    assert hass.services.has_service(DOMAIN, SERVICE_REMOVE_KNOWN_FACE)
 
     # Запуск колбэка не должен приводить к ошибке и обязан дергать API клиента.
     await stored[DATA_OPEN_DOOR]()
     api_client: _DummyApiClient = stored[DATA_API_CLIENT]
-    api_client.async_open_door.assert_awaited_once_with("00:11:22:33:44:55", 1)
+    api_client.async_open_door.assert_awaited_once_with(
+        "00:11:22:33:44:55",
+        1,
+        open_link="https://td-crm.is74.ru/api/open/main",
+    )
     persist_tokens.assert_awaited_once()
 
     # Проверяем, что сервис может открыть конкретный расшаренный домофон по uid.
@@ -223,5 +257,25 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
     shared_uid = door_openers[1]["uid"]
     await service_handler(SimpleNamespace(data={"entry_id": entry.entry_id, "door_uid": shared_uid}))
     assert api_client.async_open_door.await_count == 2
-    api_client.async_open_door.assert_called_with("AA:BB:CC:DD:EE:FF", 2)
+    api_client.async_open_door.assert_called_with(
+        "AA:BB:CC:DD:EE:FF",
+        2,
+        open_link="https://td-crm.is74.ru/api/open/shared",
+    )
     assert persist_tokens.await_count == 2
+
+    # Плановый апдейт должен быть запланирован на заданный интервал.
+    assert scheduled_intervals, "Ожидается регистрация фонового обновления"
+    interval = scheduled_intervals[0]
+    assert int(interval.total_seconds()) == DOOR_LINK_REFRESH_INTERVAL_HOURS * 3600
+    assert callable(stored[DATA_DOOR_REFRESH_UNSUB])
+    stored[DATA_DOOR_REFRESH_UNSUB]()
+    assert scheduled_intervals[-1] == "cancelled"
+
+    # Конфигурация должна быть синхронизирована с актуальными ссылками домофона.
+    assert hass.config_entries.async_update_entry.call_count >= 1
+    updated_data = hass.config_entries.async_update_entry.call_args.kwargs["data"]
+    assert updated_data[CONF_DOOR_OPEN_LINK] == "https://td-crm.is74.ru/api/open/main"
+    assert updated_data[CONF_DOOR_IMAGE_URL] == "https://snapshots.example/main.jpg"
+    assert updated_data[CONF_DOOR_HAS_VIDEO] is True
+    assert updated_data[CONF_DOOR_ADDRESS] == "Главный подъезд"
