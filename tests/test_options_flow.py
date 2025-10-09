@@ -147,3 +147,39 @@ async def test_options_flow_remove_face(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert result["type"] == "create_entry"
     manager.async_remove_known_face.assert_awaited_once_with("Гость")
+
+
+@pytest.mark.asyncio
+async def test_options_flow_add_face_with_fallback_upload(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Фолбэк UploadFile должен корректно обрабатывать байтовые данные."""
+
+    entry = SimpleNamespace(entry_id="entry", options={CONF_KNOWN_FACES: []})
+    flow = config_flow.IntersvyazOptionsFlow(entry)
+    flow.hass = SimpleNamespace(data={DOMAIN: {entry.entry_id: {}}})
+
+    manager = SimpleNamespace(
+        list_known_face_names=lambda: [],
+        library_available=True,
+        async_add_known_face=AsyncMock(),
+    )
+    flow._async_resolve_face_manager = AsyncMock(return_value=manager)
+
+    flow.async_create_entry = lambda **kwargs: {  # type: ignore[assignment]
+        "type": "create_entry",
+        **kwargs,
+    }
+
+    monkeypatch.setattr(config_flow, "HAS_NATIVE_UPLOAD_FILE", False)
+    monkeypatch.setattr(config_flow, "UploadFile", config_flow._UploadFileFallback)
+
+    upload = config_flow.UploadFile(b"image-bytes")
+    user_input = {CONF_FACE_NAME: "Гость", CONF_FACE_IMAGE: upload}
+
+    with caplog.at_level("DEBUG"):
+        result = await flow.async_step_add_face(user_input)
+
+    assert result["type"] == "create_entry"
+    manager.async_add_known_face.assert_awaited_once_with("Гость", b"image-bytes")
+    assert "заглушку UploadFile" in caplog.text

@@ -10,7 +10,35 @@ from typing import Any, Dict, List, Optional
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult, UploadFile
+from homeassistant.data_entry_flow import FlowResult
+try:
+    # В последних версиях Home Assistant тип UploadFile переехал в другие модули,
+    # поэтому импорт может завершиться неудачно и мы должны предоставить запасной
+    # класс-совместимость, чтобы интеграция корректно работала в любой среде.
+    from homeassistant.data_entry_flow import UploadFile as HassUploadFile  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - поведение зависит от версии HA
+    HassUploadFile = None  # type: ignore[assignment]
+
+
+class _UploadFileFallback:
+    """Запасной класс для имитации UploadFile в старых версиях Home Assistant."""
+
+    def __init__(self, data: bytes) -> None:
+        # Сохраняем исходные байты, чтобы методы чтения возвращали то же содержимое.
+        self._data = data
+
+    async def async_read(self) -> bytes:
+        """Асинхронно вернуть сохранённые байты изображения."""
+
+        return self._data
+
+
+# Экспортируем единое имя UploadFile, чтобы остальной код мог работать прозрачно,
+# независимо от того, предоставил ли Home Assistant оригинальный тип.
+UploadFile = HassUploadFile or _UploadFileFallback  # type: ignore[assignment]
+
+# Флаг пригодится для диагностического логирования и проверки веток кода.
+HAS_NATIVE_UPLOAD_FILE = HassUploadFile is not None
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers import selector
@@ -554,6 +582,10 @@ class IntersvyazOptionsFlow(config_entries.OptionsFlow):
         """Преобразовать загруженный пользователем файл в байтовый массив."""
 
         if isinstance(upload, UploadFile):
+            if not HAS_NATIVE_UPLOAD_FILE:
+                _LOGGER.debug(
+                    "Используем встроенную заглушку UploadFile для чтения изображения"
+                )
             try:
                 return await upload.async_read()
             except Exception as err:  # pragma: no cover - защитный сценарий
