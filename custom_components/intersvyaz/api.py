@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qsl, urlparse
 
 from aiohttp import ClientError, ClientResponse, ClientSession
 
@@ -591,8 +592,30 @@ class IntersvyazApiClient:
         )
         return relays
 
-    async def async_open_door(self, mac: str, door_id: int) -> None:
-        """Открыть домофон с указанным MAC-адресом."""
+    async def async_open_door(
+        self,
+        mac: Optional[str] = None,
+        door_id: Optional[int] = None,
+        *,
+        open_link: Optional[str] = None,
+    ) -> None:
+        """Открыть домофон, используя прямую ссылку или классические параметры."""
+
+        if open_link:
+            _LOGGER.info(
+                "Получена заявка на открытие домофона по ссылке: mac=%s door_id=%s", mac, door_id
+            )
+            await self._async_open_door_by_link(open_link)
+            return
+
+        if not mac:
+            raise IntersvyazApiError(
+                "Не удалось определить MAC-адрес домофона для открытия"
+            )
+        if door_id is None:
+            raise IntersvyazApiError(
+                "Не удалось определить номер реле домофона для открытия"
+            )
 
         await self._ensure_crm_token()
         assert self._crm_token is not None
@@ -606,6 +629,38 @@ class IntersvyazApiClient:
             endpoint,
             headers=headers,
             use_crm_token=True,
+        )
+
+    async def _async_open_door_by_link(self, open_link: str) -> None:
+        """Открыть домофон, используя прямой URL из API списка реле."""
+
+        normalized_link = (open_link or "").strip()
+        if not normalized_link:
+            raise IntersvyazApiError(
+                "API не вернуло ссылку открытия домофона"
+            )
+
+        await self._ensure_crm_token()
+        parsed = urlparse(normalized_link)
+        if parsed.scheme and parsed.netloc:
+            base_url = f"{parsed.scheme}://{parsed.netloc}"
+            endpoint = parsed.path or "/"
+            params = dict(parse_qsl(parsed.query)) if parsed.query else None
+        else:
+            base_url = self._crm_base_url
+            endpoint = normalized_link if normalized_link.startswith("/") else f"/{normalized_link}"
+            params = None
+
+        headers = self._build_crm_headers(include_crm_bearer=True)
+        _LOGGER.info(
+            "Отправляем запрос открытия домофона по прямой ссылке %s", endpoint
+        )
+        await self._request(
+            base_url=base_url,
+            method="GET",
+            endpoint=endpoint,
+            headers=headers,
+            params=params,
         )
 
     # ------------------------------------------------------------------

@@ -65,6 +65,7 @@ def test_integration_importable(repo_root: Path) -> None:
     core_module = ensure_module("homeassistant.core")
     helpers_module = ensure_module("homeassistant.helpers")
     aiohttp_client_module = ensure_module("homeassistant.helpers.aiohttp_client")
+    event_module = ensure_module("homeassistant.helpers.event")
     update_coordinator_module = ensure_module("homeassistant.helpers.update_coordinator")
     const_module = ensure_module("homeassistant.const")
     exceptions_module = ensure_module("homeassistant.exceptions")
@@ -90,8 +91,12 @@ def test_integration_importable(repo_root: Path) -> None:
     core_module.HomeAssistant = _HomeAssistant
     core_module.ServiceCall = _ServiceCall
     helpers_module.aiohttp_client = aiohttp_client_module
+    helpers_module.event = event_module
     aiohttp_client_module.async_get_clientsession = _async_get_clientsession
-    const_module.Platform = types.SimpleNamespace(SENSOR="sensor", BUTTON="button")
+    const_module.Platform = types.SimpleNamespace(
+        SENSOR="sensor", BUTTON="button", CAMERA="camera"
+    )
+    event_module.async_track_time_interval = lambda *_args, **_kwargs: None
 
     class _HomeAssistantError(Exception):  # pragma: no cover - заглушка ошибки
         pass

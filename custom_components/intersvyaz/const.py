@@ -7,6 +7,7 @@ DATA_CONFIG = "config"
 DATA_COORDINATOR = "coordinator"
 DATA_OPEN_DOOR = "open_door"
 DATA_DOOR_OPENERS = "door_openers"
+DATA_DOOR_REFRESH_UNSUB = "door_refresh_unsub"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
@@ -36,6 +37,8 @@ DEFAULT_BUYER_ID = 1
 DEFAULT_TIMEOUT = 30
 TOKEN_EXPIRATION_MARGIN = 60
 DEFAULT_UPDATE_INTERVAL_MINUTES = 10
+DOOR_LINK_REFRESH_INTERVAL_HOURS = 6
+CAMERA_FRAME_INTERVAL_SECONDS = 5
 
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
@@ -61,6 +64,7 @@ CONF_DOOR_ADDRESS = "door_address"
 CONF_DOOR_HAS_VIDEO = "door_has_video"
 CONF_DOOR_IMAGE_URL = "door_image_url"
 CONF_ENTRANCE_UID = "entrance_uid"
+CONF_DOOR_OPEN_LINK = "door_open_link"
 
 # Заголовки
 HEADER_AUTHORIZATION = "Authorization"
