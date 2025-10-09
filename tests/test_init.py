@@ -287,3 +287,147 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
     assert updated_data[CONF_DOOR_IMAGE_URL] == "https://snapshots.example/main.jpg"
     assert updated_data[CONF_DOOR_HAS_VIDEO] is True
     assert updated_data[CONF_DOOR_ADDRESS] == "Главный подъезд"
+
+
+@pytest.mark.asyncio
+async def test_add_known_face_service_accepts_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сервис добавления лиц должен уметь обрабатывать пакет с несколькими гостями."""
+
+    hass = SimpleNamespace(
+        data={},
+        services=_DummyServices(),
+        config_entries=_DummyConfigEntries(),
+    )
+
+    # Подменяем сетевые и фоновые зависимости, чтобы изоляционно проверить сервис.
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.async_get_clientsession",
+        lambda _hass: SimpleNamespace(),
+    )
+
+    scheduled_intervals: list[Any] = []
+
+    def _fake_track_time_interval(hass: Any, action: Callable[..., Any], interval: Any) -> Callable[[], None]:
+        """Сохраняем интервалы, не создавая реальных задач Home Assistant."""
+
+        scheduled_intervals.append(interval)
+
+        def _cancel() -> None:
+            scheduled_intervals.append("cancelled")
+
+        return _cancel
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.async_track_time_interval",
+        _fake_track_time_interval,
+    )
+
+    fake_coordinator = SimpleNamespace(async_config_entry_first_refresh=AsyncMock())
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.IntersvyazDataUpdateCoordinator",
+        lambda hass, api_client: fake_coordinator,
+    )
+    persist_tokens = AsyncMock()
+    monkeypatch.setattr("custom_components.intersvyaz._persist_tokens", persist_tokens)
+
+    class _RecordingFaceManager:
+        """Заглушка менеджера распознавания, фиксирующая добавленные лица."""
+
+        instances: list["_RecordingFaceManager"] = []
+
+        def __init__(self, hass: Any, entry: Any, *args: Any, **kwargs: Any) -> None:
+            self.hass = hass
+            self.entry = entry
+            self.added: list[tuple[str, bytes]] = []
+            _RecordingFaceManager.instances.append(self)
+
+        async def async_add_known_face(self, name: str, image_bytes: bytes) -> None:
+            """Сохраняем имя и байты изображения для последующей проверки."""
+
+            self.added.append((name, image_bytes))
+
+        async def async_remove_known_face(self, name: str) -> None:  # pragma: no cover - не используется
+            self.added = [item for item in self.added if item[0] != name]
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.FaceRecognitionManager",
+        _RecordingFaceManager,
+    )
+
+    class _SilentBackgroundProcessor:
+        """Заглушка фонового процессора, не запускающая таймеры."""
+
+        def __init__(self, hass: Any, entry: Any) -> None:
+            self.hass = hass
+            self.entry = entry
+
+        async def async_setup(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.DoorBackgroundProcessor",
+        _SilentBackgroundProcessor,
+    )
+
+    entry = _DummyEntry(
+        {
+            CONF_DEVICE_ID: "device",
+            CONF_DOOR_MAC: "00:11:22:33:44:55",
+            CONF_DOOR_ENTRANCE: 3,
+            CONF_MOBILE_TOKEN: "mobile",
+            CONF_CRM_TOKEN: "crm",
+            CONF_BUYER_ID: DEFAULT_BUYER_ID,
+        }
+    )
+
+    relay = RelayInfo(
+        address="Главный подъезд",
+        relay_id="1",
+        status_code=None,
+        building_id=None,
+        mac="00:11:22:33:44:55",
+        status_text=None,
+        is_main=True,
+        has_video=True,
+        entrance_uid="uid-main",
+        porch_num="1",
+        relay_type=None,
+        relay_descr=None,
+        smart_intercom=None,
+        num_building=None,
+        letter_building=None,
+        image_url="https://snapshots.example/main.jpg",
+        open_link="https://td-crm.is74.ru/api/open/main",
+        opener=RelayOpener(relay_id=10, relay_num=1, mac="00:11:22:33:44:55"),
+        raw={"ADDRESS": "Главный подъезд"},
+    )
+
+    created_clients: list[_DummyApiClient] = []
+
+    def _client_factory(*args: Any, **kwargs: Any) -> _DummyApiClient:
+        client = _DummyApiClient(*args, **kwargs)
+        client.async_get_relays.return_value = [relay]
+        created_clients.append(client)
+        return client
+
+    monkeypatch.setattr(
+        "custom_components.intersvyaz.IntersvyazApiClient",
+        _client_factory,
+    )
+
+    setup_result = await async_setup_entry(hass, entry)
+    assert setup_result is True
+
+    service_handler = hass.services._handlers[(DOMAIN, SERVICE_ADD_KNOWN_FACE)]
+    manager = _RecordingFaceManager.instances[-1]
+
+    faces_payload = [
+        {"name": "Алексей", "image_base64": "aGVsbG8="},
+        {"name": "Мария", "image_base64": "d29ybGQ="},
+    ]
+
+    await service_handler(SimpleNamespace(data={"entry_id": entry.entry_id, "faces": faces_payload}))
+
+    assert [name for name, _ in manager.added] == ["Алексей", "Мария"]
+    assert manager.added[0][1] == b"hello"
+    assert manager.added[1][1] == b"world"

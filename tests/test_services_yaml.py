@@ -74,8 +74,8 @@ def test_services_yaml_structure(services_file: Path) -> None:
     expected_services = {
         "open_door": {"required_fields": {"entry_id"}, "optional_fields": {"door_uid"}},
         "add_known_face": {
-            "required_fields": {"entry_id", "name"},
-            "optional_fields": {"image_url", "image_base64"},
+            "required_fields": {"entry_id"},
+            "optional_fields": {"name", "image_url", "image_base64", "faces"},
         },
         "remove_known_face": {
             "required_fields": {"entry_id", "name"},

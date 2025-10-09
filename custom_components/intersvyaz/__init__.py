@@ -6,7 +6,7 @@ import base64
 import binascii
 import logging
 from datetime import timedelta
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 
 from aiohttp import ClientError
 import voluptuous as vol
@@ -52,6 +52,16 @@ from .const import (
 )
 from .face_manager import FaceRecognitionManager
 
+try:
+    VolInvalid = vol.Invalid  # type: ignore[attr-defined]
+except AttributeError:  # pragma: no cover - резерв для облегчённых билдов voluptuous
+    class VolInvalid(Exception):
+        """Локальная замена vol.Invalid для окружений без полной библиотеки."""
+
+        pass
+
+    setattr(vol, "Invalid", VolInvalid)
+
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
 PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.CAMERA]
@@ -63,12 +73,67 @@ SERVICE_OPEN_DOOR_SCHEMA = vol.Schema(
     }
 )
 
+def _validate_add_face_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Проверить, что схема сервиса добавления лиц заполнена корректно."""
+
+    # Превращаем список лиц в единый формат, чтобы дальнейшая обработка валидации
+    # была одинаковой для одиночного и пакетного режима.
+    faces_raw = data.get("faces")
+    faces: Sequence[dict[str, Any]] | None
+    if faces_raw is None:
+        faces = None
+    elif isinstance(faces_raw, (list, tuple, set)):
+        faces = list(faces_raw)
+    else:
+        faces = [faces_raw]
+    has_single_fields = any(data.get(field) for field in ("name", "image_url", "image_base64"))
+
+    if faces:
+        if has_single_fields:
+            raise VolInvalid(
+                "Нельзя одновременно указывать список faces и одиночные поля name/image_*"
+            )
+        if not isinstance(faces, Sequence) or not faces:
+            raise VolInvalid("Список faces должен содержать минимум одну запись")
+
+        normalized_faces: list[dict[str, Any]] = []
+        for index, face in enumerate(faces, start=1):
+            if not isinstance(face, dict):
+                raise VolInvalid(
+                    f"Элемент №{index} в faces должен быть словарём с параметрами"
+                )
+            if not face.get("name"):
+                raise VolInvalid(f"Лицо №{index} должно содержать имя в поле name")
+            has_url = bool(face.get("image_url"))
+            has_base64 = bool(face.get("image_base64"))
+            if has_url == has_base64:
+                raise VolInvalid(
+                    f"Лицо №{index} должно содержать ровно один источник изображения"
+                )
+            normalized_faces.append(face)
+        data["faces"] = normalized_faces
+        return data
+
+    if not data.get("name"):
+        raise VolInvalid("Поле name обязательно для одиночного добавления лица")
+
+    has_url = bool(data.get("image_url"))
+    has_base64 = bool(data.get("image_base64"))
+    if has_url == has_base64:
+        raise VolInvalid(
+            "Укажите ровно один источник изображения: image_url или image_base64"
+        )
+
+    return data
+
+
 ADD_KNOWN_FACE_SCHEMA = vol.Schema(
     {
         vol.Required("entry_id"): cv.string,
-        vol.Required("name"): cv.string,
+        vol.Optional("name"): cv.string,
         vol.Optional("image_url"): cv.string,
         vol.Optional("image_base64"): cv.string,
+        vol.Optional("faces"): list,
     }
 )
 
@@ -323,21 +388,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     if not hass.services.has_service(DOMAIN, SERVICE_ADD_KNOWN_FACE):
 
         async def handle_add_known_face(call: ServiceCall) -> None:
-            """Сохранить новое лицо для автоматического открытия домофона."""
+            """Сохранить одно или несколько лиц для автоматического открытия домофона."""
 
-            service_entry_id = call.data["entry_id"]
-            name = call.data["name"]
-            image_url = call.data.get("image_url")
-            image_base64 = call.data.get("image_base64")
-
-            if not image_url and not image_base64:
-                raise HomeAssistantError(
-                    "Укажите image_url или image_base64 для загрузки фотографии лица"
-                )
-            if image_url and image_base64:
-                raise HomeAssistantError(
-                    "Нужно указать только один источник изображения: URL или base64"
-                )
+            call_data = _validate_add_face_payload(dict(call.data))
+            service_entry_id = call_data["entry_id"]
 
             domain_data = hass.data.get(DOMAIN, {})
             entry_storage = domain_data.get(service_entry_id)
@@ -354,28 +408,71 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                     "Распознавание лиц не инициализировано для указанной записи"
                 )
 
-            if image_url:
-                session = async_get_clientsession(hass)
-                try:
-                    async with session.get(image_url) as response:
-                        if response.status != 200:
-                            raise HomeAssistantError(
-                                f"Не удалось загрузить изображение по URL: статус {response.status}"
-                            )
-                        image_bytes = await response.read()
-                except (ClientError, asyncio.TimeoutError) as err:
-                    raise HomeAssistantError(
-                        f"Ошибка загрузки изображения по URL {image_url}: {err}"
-                    ) from err
+            # Составляем список лиц, соблюдая обратную совместимость с одиночным режимом.
+            faces_payload: list[dict[str, Any]]
+            if call_data.get("faces"):
+                faces_payload = list(call_data["faces"])
             else:
+                faces_payload = [
+                    {
+                        "name": call_data["name"],
+                        "image_url": call_data.get("image_url"),
+                        "image_base64": call_data.get("image_base64"),
+                    }
+                ]
+
+            session = async_get_clientsession(hass)
+
+            async def _load_image_bytes(face_data: dict[str, Any]) -> bytes:
+                """Получить байты изображения для конкретного лица."""
+
+                image_url = face_data.get("image_url")
+                image_base64 = face_data.get("image_base64")
+
+                if image_url:
+                    _LOGGER.info(
+                        "Загружаем изображение лица '%s' по URL для entry_id=%s",\
+                        face_data.get("name"),
+                        service_entry_id,
+                    )
+                    try:
+                        async with session.get(image_url) as response:
+                            if response.status != 200:
+                                raise HomeAssistantError(
+                                    "Не удалось загрузить изображение по URL %s: статус %s"
+                                    % (image_url, response.status)
+                                )
+                            return await response.read()
+                    except (ClientError, asyncio.TimeoutError) as err:
+                        raise HomeAssistantError(
+                            f"Ошибка загрузки изображения по URL {image_url}: {err}"
+                        ) from err
+
                 try:
-                    image_bytes = base64.b64decode(image_base64, validate=True)
+                    _LOGGER.debug(
+                        "Декодируем изображение лица '%s' из base64 для entry_id=%s",
+                        face_data.get("name"),
+                        service_entry_id,
+                    )
+                    return base64.b64decode(image_base64, validate=True)
                 except (binascii.Error, ValueError) as err:
                     raise HomeAssistantError(
                         "Не удалось декодировать image_base64, проверьте строку"
                     ) from err
 
-            await face_manager.async_add_known_face(name, image_bytes)
+            for index, face_data in enumerate(faces_payload, start=1):
+                face_name = face_data.get("name")
+                _LOGGER.info(
+                    "Добавляем лицо №%s ('%s') через сервис для entry_id=%s",\
+                    index,
+                    face_name,
+                    service_entry_id,
+                )
+                image_bytes = await _load_image_bytes(face_data)
+                await face_manager.async_add_known_face(face_name, image_bytes)
+                _LOGGER.info(
+                    "Лицо '%s' успешно сохранено для entry_id=%s", face_name, service_entry_id
+                )
 
         hass.services.async_register(
             DOMAIN,
