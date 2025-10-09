@@ -1,6 +1,11 @@
 """Тесты менеджера распознавания лиц Intersvyaz."""
 from __future__ import annotations
 
+import builtins
+import importlib
+import sys
+import types
+import warnings
 from types import SimpleNamespace
 from typing import List
 from unittest.mock import AsyncMock
@@ -158,3 +163,43 @@ def test_face_manager_lists_known_faces(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert manager.list_known_face_names() == ["Гость"]
     assert len(manager.list_known_faces()) == 1
+
+
+def test_face_manager_suppresses_pkg_resources_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """При импорте модуля предупреждение о pkg_resources должно подавляться."""
+
+    original_import = builtins.__import__
+
+    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        """Подмена импорта face_recognition, генерирующая предупреждение."""
+
+        if name == "face_recognition" and level == 0:
+            warnings.warn(
+                "pkg_resources is deprecated as an API.",
+                UserWarning,
+            )
+            module = types.ModuleType("face_recognition")
+            module.face_encodings = lambda *_args, **_kwargs: []
+            module.face_distance = lambda *_args, **_kwargs: []
+            module.load_image_file = lambda stream: stream.read()
+            sys.modules[name] = module
+            return module
+        return original_import(name, globals, locals, fromlist, level)
+
+    # Убедимся, что предыдущие импорты не мешают воспроизведению предупреждения.
+    monkeypatch.setitem(sys.modules, "face_recognition", None, raising=False)
+    monkeypatch.setattr(builtins, "__import__", _fake_import)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("error")
+        reloaded = importlib.reload(face_manager)
+
+    # Предупреждение должно быть погашено локальным фильтром внутри face_manager.
+    assert not caught
+    assert reloaded._SUPPRESSED_PKG_RESOURCES_WARNING is True
+
+    # Возвращаем исходное состояние, чтобы остальные тесты работали с чистым модулем.
+    monkeypatch.undo()
+    importlib.reload(face_manager)
