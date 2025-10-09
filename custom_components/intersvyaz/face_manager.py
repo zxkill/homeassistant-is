@@ -5,6 +5,7 @@ import asyncio
 import io
 import logging
 import time
+import warnings
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Iterable, List, Optional
 
@@ -22,12 +23,40 @@ from .const import (
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
 )
 
+# Флаг для юнит-тестов и диагностики, сигнализирует о подавлении устаревшего предупреждения
+# от зависимостей face_recognition. Важен для отслеживания корректной фильтрации предупреждений
+# об устаревшем API pkg_resources.
+_SUPPRESSED_PKG_RESOURCES_WARNING = False
+
 try:
-    import face_recognition  # type: ignore
+    # Библиотека face_recognition тянет за собой пакет face_recognition_models, который при импорте
+    # генерирует предупреждение о грядущем удалении pkg_resources. Это предупреждение мешает
+    # пользователям и засоряет журнал Home Assistant, поэтому при импорте временно подавляем его
+    # через локальный фильтр, оставляя остальные уведомления без изменений.
+    with warnings.catch_warnings(record=True) as suppressed_warnings:
+        warnings.filterwarnings(
+            "ignore",
+            message="pkg_resources is deprecated as an API.",
+            category=UserWarning,
+            module="face_recognition_models",
+        )
+        import face_recognition  # type: ignore
+
+    _SUPPRESSED_PKG_RESOURCES_WARNING = any(
+        "pkg_resources is deprecated as an API." in str(item.message)
+        for item in suppressed_warnings
+    )
 except ImportError:  # pragma: no cover - обработка отсутствия библиотеки
     face_recognition = None
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.face_manager")
+
+# Если при импорте зависимости было подавлено предупреждение об устаревшем pkg_resources,
+# зафиксируем это в логе для дальнейшей диагностики и контроля будущих обновлений.
+if _SUPPRESSED_PKG_RESOURCES_WARNING:
+    _LOGGER.debug(
+        "Предупреждение об устаревшем pkg_resources от face_recognition_models было подавлено"
+    )
 
 
 @dataclass
