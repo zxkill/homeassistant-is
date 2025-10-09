@@ -74,6 +74,9 @@ class DoorBackgroundProcessor:
         self._selected_uids: set[str] = set()
         # Блокировка защищает выполнение цикла от конкурентных запусков.
         self._lock = asyncio.Lock()
+        # Флаг показывает, что во время выполнения цикла прилетел ещё один запуск,
+        # и его нужно повторить сразу после завершения текущего.
+        self._has_pending_run = False
 
     @property
     def selected_uids(self) -> set[str]:
@@ -93,6 +96,7 @@ class DoorBackgroundProcessor:
             self._unsubscribe()
             self._unsubscribe = None
         self._selected_uids.clear()
+        self._has_pending_run = False
 
     async def async_refresh_from_options(self, *, initial: bool = False) -> None:
         """Перечитать настройки пользователя и обновить расписание."""
@@ -158,7 +162,7 @@ class DoorBackgroundProcessor:
         )
         self._unsubscribe = self._scheduler(
             self._hass,
-            lambda now: asyncio.create_task(self._async_process_selected()),
+            lambda now: self._hass.async_create_task(self._async_process_selected()),
             timedelta(seconds=self._interval),
         )
 
@@ -182,58 +186,82 @@ class DoorBackgroundProcessor:
         """Загрузить снимки для всех выбранных домофонов и запустить распознавание."""
 
         if not self._selected_uids:
-            return
-        if self._lock.locked():
             _LOGGER.debug(
-                "Пропускаем запуск фонового цикла для entry_id=%s: предыдущий ещё выполняется",
+                "Фоновый цикл entry_id=%s не запланирован: список домофонов пуст",
                 self._entry.entry_id,
             )
             return
+        if self._lock.locked():
+            _LOGGER.debug(
+                "Запрос фонового цикла для entry_id=%s получен во время выполнения —"
+                " отметим необходимость повторного запуска",
+                self._entry.entry_id,
+            )
+            self._has_pending_run = True
+            return
 
+        run_again = False
         async with self._lock:
-            domain_store = self._hass.data.get(DOMAIN, {})
-            entry_store = domain_store.get(self._entry.entry_id, {})
-            manager = entry_store.get(DATA_FACE_MANAGER)
-            if manager is None:
+            try:
                 _LOGGER.debug(
-                    "Менеджер распознавания лиц недоступен, фоновая обработка entry_id=%s"
-                    " пропущена",
+                    "Начинаем фоновый цикл загрузки снимков для entry_id=%s (домофоны: %s)",
                     self._entry.entry_id,
+                    ", ".join(sorted(self._selected_uids)),
                 )
-                return
-
-            default_open = entry_store.get(DATA_OPEN_DOOR)
-            doors = self._list_available_doors()
-            if not doors:
-                _LOGGER.debug(
-                    "Для entry_id=%s не осталось домофонов с видео, таймер будет очищен",
-                    self._entry.entry_id,
-                )
-                self.async_stop()
-                return
-
-            session = async_get_clientsession(self._hass)
-            for uid in list(self._selected_uids):
-                door = doors.get(uid)
-                if not door:
-                    _LOGGER.info(
-                        "Домофон uid=%s больше недоступен для entry_id=%s, удаляем из фонового"
-                        " списка",
-                        uid,
+                domain_store = self._hass.data.get(DOMAIN, {})
+                entry_store = domain_store.get(self._entry.entry_id, {})
+                manager = entry_store.get(DATA_FACE_MANAGER)
+                if manager is None:
+                    _LOGGER.debug(
+                        "Менеджер распознавания лиц недоступен, фоновая обработка entry_id=%s"
+                        " пропущена",
                         self._entry.entry_id,
                     )
-                    self._selected_uids.discard(uid)
-                    continue
-                await self._async_process_single(session, manager, door, default_open)
+                    return
 
-            if not self._selected_uids:
-                _LOGGER.info(
-                    "Все домофоны были исключены из фоновой обработки entry_id=%s",
-                    self._entry.entry_id,
-                )
-                if self._unsubscribe:
-                    self._unsubscribe()
-                    self._unsubscribe = None
+                default_open = entry_store.get(DATA_OPEN_DOOR)
+                doors = self._list_available_doors()
+                if not doors:
+                    _LOGGER.debug(
+                        "Для entry_id=%s не осталось домофонов с видео, таймер будет очищен",
+                        self._entry.entry_id,
+                    )
+                    self.async_stop()
+                    return
+
+                session = async_get_clientsession(self._hass)
+                for uid in list(self._selected_uids):
+                    door = doors.get(uid)
+                    if not door:
+                        _LOGGER.info(
+                            "Домофон uid=%s больше недоступен для entry_id=%s, удаляем из фонового"
+                            " списка",
+                            uid,
+                            self._entry.entry_id,
+                        )
+                        self._selected_uids.discard(uid)
+                        continue
+                    await self._async_process_single(session, manager, door, default_open)
+
+                if not self._selected_uids:
+                    _LOGGER.info(
+                        "Все домофоны были исключены из фоновой обработки entry_id=%s",
+                        self._entry.entry_id,
+                    )
+                    if self._unsubscribe:
+                        self._unsubscribe()
+                        self._unsubscribe = None
+            finally:
+                run_again = self._has_pending_run
+                self._has_pending_run = False
+
+        if run_again:
+            _LOGGER.debug(
+                "Для entry_id=%s запланирован немедленный повтор фонового цикла после"
+                " завершения предыдущего",
+                self._entry.entry_id,
+            )
+            self._hass.async_create_task(self._async_process_selected())
 
     async def _async_process_single(
         self,
