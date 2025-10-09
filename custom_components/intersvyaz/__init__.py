@@ -19,6 +19,7 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
 from .api import IntersvyazApiClient, IntersvyazApiError, RelayInfo
+from .background import DoorBackgroundProcessor
 from .coordinator import IntersvyazDataUpdateCoordinator
 from .const import (
     CONF_BUYER_ID,
@@ -39,6 +40,7 @@ from .const import (
     DATA_DOOR_OPENERS,
     DATA_DOOR_REFRESH_UNSUB,
     DATA_FACE_MANAGER,
+    DATA_BACKGROUND_PROCESSOR,
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOOR_LINK_REFRESH_INTERVAL_HOURS,
@@ -230,6 +232,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     face_manager = FaceRecognitionManager(hass, entry)
     hass.data[DOMAIN][entry.entry_id][DATA_FACE_MANAGER] = face_manager
 
+    background_processor = DoorBackgroundProcessor(hass, entry)
+    hass.data[DOMAIN][entry.entry_id][DATA_BACKGROUND_PROCESSOR] = background_processor
+    await background_processor.async_setup()
+
     _sync_config_with_primary_door(hass, entry, door_openers)
 
     async def _scheduled_refresh(_now=None) -> None:
@@ -409,6 +415,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=REMOVE_KNOWN_FACE_SCHEMA,
         )
 
+    entry.async_on_unload(entry.add_update_listener(_async_handle_entry_update))
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _LOGGER.info("Интеграция Intersvyaz успешно настроена")
     return True
@@ -427,6 +435,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         if callable(unsubscribe):
             unsubscribe()
         entry_store.pop(DATA_FACE_MANAGER, None)
+        background_processor = entry_store.get(DATA_BACKGROUND_PROCESSOR)
+        if isinstance(background_processor, DoorBackgroundProcessor):
+            background_processor.async_stop()
+        entry_store.pop(DATA_BACKGROUND_PROCESSOR, None)
     if not domain_store:
         hass.services.async_remove(DOMAIN, SERVICE_OPEN_DOOR)
         hass.data.pop(DOMAIN, None)
@@ -649,3 +661,23 @@ async def _async_refresh_door_links(
         primary = door_openers[0]
     if primary and callable(primary.get("callback")):
         domain_store[DATA_OPEN_DOOR] = primary["callback"]
+
+    background_processor = domain_store.get(DATA_BACKGROUND_PROCESSOR)
+    if isinstance(background_processor, DoorBackgroundProcessor):
+        await background_processor.async_refresh_from_options()
+
+
+async def _async_handle_entry_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Перезапустить фоновые задачи при изменении настроек записи."""
+
+    domain_store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if not domain_store:
+        _LOGGER.debug(
+            "Получено уведомление об обновлении entry_id=%s, но данные не найдены",
+            entry.entry_id,
+        )
+        return
+
+    background_processor = domain_store.get(DATA_BACKGROUND_PROCESSOR)
+    if isinstance(background_processor, DoorBackgroundProcessor):
+        await background_processor.async_refresh_from_options()

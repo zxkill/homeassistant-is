@@ -162,6 +162,15 @@ def _load_config_flow_module(*, library_available: bool) -> Iterator[types.Modul
         set_module("homeassistant.helpers.aiohttp_client", aiohttp_client_module)
         helpers_module.aiohttp_client = aiohttp_client_module  # type: ignore[attr-defined]
 
+        event_module = types.ModuleType("homeassistant.helpers.event")
+
+        def _async_track_time_interval(*args: Any, **kwargs: Any):  # pragma: no cover - заглушка
+            return lambda: None
+
+        event_module.async_track_time_interval = _async_track_time_interval  # type: ignore[attr-defined]
+        set_module("homeassistant.helpers.event", event_module)
+        helpers_module.event = event_module  # type: ignore[attr-defined]
+
         # --- Пакет custom_components ---
         custom_components_module = types.ModuleType("custom_components")
         custom_components_module.__path__ = [str(PACKAGE_ROOT.parent)]  # type: ignore[attr-defined]
@@ -282,7 +291,16 @@ class _DummyHass:
 
     def __init__(self) -> None:
         self.data: Dict[str, Any] = {}
-        self.config_entries = types.SimpleNamespace(async_update_entry=AsyncMock())
+        async def _update_entry(entry: Any, *, data: Any | None = None, options: Any | None = None):
+            if options is not None:
+                entry.options = options
+            if data is not None:
+                entry.data = data
+            return True
+
+        self.config_entries = types.SimpleNamespace(
+            async_update_entry=AsyncMock(side_effect=_update_entry)
+        )
 
     async def async_add_executor_job(self, func, *args):
         loop = asyncio.get_running_loop()
@@ -376,5 +394,50 @@ def test_options_flow_remove_face_updates_manager() -> None:
             assert result["type"] == "create_entry"
             manager = flow.hass.data[module.DOMAIN][entry.entry_id][module.DATA_FACE_MANAGER]
             assert manager.remove_calls == ["Гость"]
+
+    asyncio.run(_run())
+
+
+def test_options_flow_background_cameras_updates_options() -> None:
+    """Настройка фоновых камер обновляет опции записи."""
+
+    async def _run() -> None:
+        with _load_config_flow_module(library_available=True) as module:
+            entry = _DummyConfigEntry()
+            flow = module.IntersvyazOptionsFlow(entry)
+            hass = _DummyHass()
+            hass.data = {
+                module.DOMAIN: {
+                    entry.entry_id: {
+                        module.DATA_DOOR_OPENERS: [
+                            {
+                                "uid": "door-1",
+                                "address": "Первый",
+                                "has_video": True,
+                                "image_url": "https://snapshots/door-1.jpg",
+                                "is_main": True,
+                            },
+                            {
+                                "uid": "door-2",
+                                "address": "Второй",
+                                "has_video": True,
+                                "image_url": "https://snapshots/door-2.jpg",
+                            },
+                        ]
+                    }
+                }
+            }
+            flow.hass = hass
+
+            await flow.async_step_init()
+            form = await flow.async_step_background_cameras()
+            assert form["type"] == "form"
+
+            user_input = {module.CONF_BACKGROUND_CAMERAS: ["door-2"]}
+            result = await flow.async_step_background_cameras(user_input)
+
+            assert result["type"] == "create_entry"
+            assert hass.config_entries.async_update_entry.await_count == 1
+            assert entry.options[module.CONF_BACKGROUND_CAMERAS] == ["door-2"]
 
     asyncio.run(_run())
