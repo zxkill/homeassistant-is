@@ -103,6 +103,16 @@ class FaceRecognitionManager:
         else:
             _LOGGER.info("Известные лица для автоматического открытия не заданы")
 
+    def list_known_faces(self) -> list[KnownFace]:
+        """Вернуть копию текущего списка известных лиц для отображения в UI."""
+
+        return list(self._known_faces)
+
+    def list_known_face_names(self) -> list[str]:
+        """Вернуть список имён известных лиц без раскрытия векторов признаков."""
+
+        return [face.name for face in self._known_faces]
+
     async def async_add_known_face(self, name: str, image_bytes: bytes) -> None:
         """Добавить новое известное лицо, вычислив вектор признаков."""
 

@@ -34,4 +34,41 @@
       "relay_data_invalid": "The server returned invalid doorphone data. Try selecting another address."
     }
   }
+  ,
+  "options": {
+    "step": {
+      "init": {
+        "title": "Face recognition",
+        "description": "Known faces list:\n{known_faces}\n{error_message}",
+        "menu": {
+          "options": {
+            "add_face": "Add face",
+            "remove_face": "Remove face"
+          }
+        }
+      },
+      "add_face": {
+        "title": "Add a new face",
+        "description": "Upload a guest photo and specify the name.\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Guest name",
+          "face_image": "Face photo"
+        }
+      },
+      "remove_face": {
+        "title": "Remove a face",
+        "description": "Pick the guest that should be removed.\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Guest name"
+        }
+      }
+    },
+    "error": {
+      "library_missing": "The face_recognition library is not installed on this Home Assistant host.",
+      "invalid_name": "Please enter a valid guest name.",
+      "invalid_image": "Failed to process the uploaded image. Try another file.",
+      "add_failed": "Could not save the face. Check the logs for details.",
+      "remove_failed": "Failed to remove the face. Check the logs for details."
+    }
+  }
 }

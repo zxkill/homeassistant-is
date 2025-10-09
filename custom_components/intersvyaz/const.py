@@ -73,6 +73,7 @@ CONF_DOOR_OPEN_LINK = "door_open_link"
 CONF_KNOWN_FACES = "known_faces"
 CONF_FACE_NAME = "face_name"
 CONF_FACE_ENCODING = "face_encoding"
+CONF_FACE_IMAGE = "face_image"
 
 # Заголовки
 HEADER_AUTHORIZATION = "Authorization"

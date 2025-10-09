@@ -1,6 +1,7 @@
 """Конфигурационный поток интеграции Intersvyaz."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from html import unescape
@@ -9,8 +10,10 @@ from typing import Any, Dict, List, Optional
 import voluptuous as vol
 from homeassistant import config_entries
 from homeassistant.core import callback
-from homeassistant.data_entry_flow import FlowResult
+from homeassistant.data_entry_flow import FlowResult, UploadFile
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers import selector
 
 from .api import (
     ConfirmAddress,
@@ -41,9 +44,14 @@ from .const import (
     CONF_RELAY_NUM,
     CONF_RELAY_PAYLOAD,
     CONF_ENTRANCE_UID,
+    CONF_KNOWN_FACES,
+    CONF_FACE_NAME,
+    CONF_FACE_IMAGE,
+    DATA_FACE_MANAGER,
     DEFAULT_BUYER_ID,
     DOMAIN,
 )
+from .face_manager import FaceRecognitionManager
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.config_flow")
 
@@ -345,6 +353,251 @@ class IntersvyazConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "en": "Enter the confirmation code provided by the operator.",
         }
         return defaults.get(language, defaults["en"])
+
+
+class IntersvyazOptionsFlow(config_entries.OptionsFlow):
+    """Настройки интеграции для управления списком известных лиц."""
+
+    def __init__(self, entry: config_entries.ConfigEntry) -> None:
+        """Сохранить запись конфигурации для работы в шагах мастера."""
+
+        self._entry = entry
+        self._last_error: Optional[str] = None
+
+    async def async_step_init(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Отобразить меню действий с известными лицами."""
+
+        manager = await self._async_resolve_face_manager()
+        names = manager.list_known_face_names()
+        description = self._format_known_faces(names)
+        menu_options: Dict[str, str] = {"add_face": "add_face"}
+        if names:
+            menu_options["remove_face"] = "remove_face"
+        _LOGGER.debug(
+            "Отображаем меню настроек лиц для entry_id=%s (лиц: %s)",
+            self._entry.entry_id,
+            ", ".join(names) or "нет",
+        )
+        return self.async_show_menu(
+            step_id="init",
+            menu_options=menu_options,
+            description_placeholders={
+                "known_faces": description,
+                "error_message": self._last_error or "",
+            },
+        )
+
+    async def async_step_add_face(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Добавить новое лицо через загрузку изображения."""
+
+        manager = await self._async_resolve_face_manager()
+        errors: Dict[str, str] = {}
+        placeholders = {
+            "error_message": self._last_error or "",
+            "known_faces": self._format_known_faces(manager.list_known_face_names()),
+        }
+
+        if not manager.library_available:
+            _LOGGER.warning(
+                "Попытка добавить лицо при недоступной библиотеке распознавания"
+            )
+            errors["base"] = "library_missing"
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_FACE_NAME): str,
+                vol.Required(CONF_FACE_IMAGE): selector.FileSelector(
+                    selector.FileSelectorConfig(accept=["image/*"], multiple=False)
+                ),
+            }
+        )
+
+        if user_input is None or errors:
+            return self.async_show_form(
+                step_id="add_face",
+                data_schema=schema,
+                errors=errors,
+                description_placeholders=placeholders,
+            )
+
+        name_raw = user_input.get(CONF_FACE_NAME)
+        if not isinstance(name_raw, str) or not name_raw.strip():
+            errors["base"] = "invalid_name"
+            return self.async_show_form(
+                step_id="add_face",
+                data_schema=schema,
+                errors=errors,
+                description_placeholders=placeholders,
+            )
+        name = name_raw.strip()
+
+        upload = user_input.get(CONF_FACE_IMAGE)
+        image_bytes = await self._async_read_uploaded_file(upload)
+        if not image_bytes:
+            _LOGGER.warning(
+                "Не удалось прочитать файл изображения для лица '%s'", name
+            )
+            errors["base"] = "invalid_image"
+            return self.async_show_form(
+                step_id="add_face",
+                data_schema=schema,
+                errors=errors,
+                description_placeholders=placeholders,
+            )
+
+        try:
+            await manager.async_add_known_face(name, image_bytes)
+        except HomeAssistantError as err:
+            _LOGGER.error("Ошибка при добавлении лица '%s': %s", name, err)
+            errors["base"] = "add_failed"
+            placeholders["error_message"] = str(err)
+            self._last_error = str(err)
+            return self.async_show_form(
+                step_id="add_face",
+                data_schema=schema,
+                errors=errors,
+                description_placeholders=placeholders,
+            )
+
+        self._last_error = None
+        _LOGGER.info("Лицо '%s' успешно добавлено через настройки", name)
+        return self.async_create_entry(
+            title=name,
+            data=dict(self._entry.options),
+        )
+
+    async def async_step_remove_face(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Удалить ранее добавленное лицо."""
+
+        manager = await self._async_resolve_face_manager()
+        names = manager.list_known_face_names()
+        if not names:
+            _LOGGER.debug(
+                "Запрошено удаление лица, но список пуст для entry_id=%s",
+                self._entry.entry_id,
+            )
+            self._last_error = None
+            return await self.async_step_init()
+
+        schema = vol.Schema({vol.Required(CONF_FACE_NAME): vol.In(sorted(names))})
+        placeholders = {
+            "known_faces": self._format_known_faces(names),
+            "error_message": self._last_error or "",
+        }
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="remove_face",
+                data_schema=schema,
+                description_placeholders=placeholders,
+            )
+
+        name = user_input.get(CONF_FACE_NAME)
+        if not isinstance(name, str):
+            _LOGGER.warning(
+                "Удаление лица отклонено из-за некорректного значения: %s", name
+            )
+            return self.async_show_form(
+                step_id="remove_face",
+                data_schema=schema,
+                errors={"base": "invalid_name"},
+                description_placeholders=placeholders,
+            )
+
+        try:
+            await manager.async_remove_known_face(name)
+        except HomeAssistantError as err:
+            _LOGGER.error("Не удалось удалить лицо '%s': %s", name, err)
+            self._last_error = str(err)
+            return self.async_show_form(
+                step_id="remove_face",
+                data_schema=schema,
+                errors={"base": "remove_failed"},
+                description_placeholders={
+                    "known_faces": self._format_known_faces(manager.list_known_face_names()),
+                    "error_message": str(err),
+                },
+            )
+
+        _LOGGER.info("Лицо '%s' удалено через настройки", name)
+        self._last_error = None
+        return self.async_create_entry(
+            title=name,
+            data=dict(self._entry.options),
+        )
+
+    async def _async_resolve_face_manager(self) -> FaceRecognitionManager:
+        """Получить менеджер распознавания лиц, создавая его при необходимости."""
+
+        hass = self.hass
+        domain_store = hass.data.setdefault(DOMAIN, {})
+        entry_store = domain_store.setdefault(self._entry.entry_id, {})
+        manager: FaceRecognitionManager | None = entry_store.get(DATA_FACE_MANAGER)
+        if isinstance(manager, FaceRecognitionManager):
+            return manager
+
+        _LOGGER.debug(
+            "Менеджер лиц не найден в памяти, создаём заново для entry_id=%s",
+            self._entry.entry_id,
+        )
+        manager = FaceRecognitionManager(hass, self._entry)
+        entry_store[DATA_FACE_MANAGER] = manager
+        return manager
+
+    async def _async_read_uploaded_file(self, upload: Any) -> bytes:
+        """Преобразовать загруженный пользователем файл в байтовый массив."""
+
+        if isinstance(upload, UploadFile):
+            try:
+                return await upload.async_read()
+            except Exception as err:  # pragma: no cover - защитный сценарий
+                _LOGGER.error("Ошибка чтения загруженного файла: %s", err)
+                return b""
+
+        file_obj = getattr(upload, "file", None)
+        if file_obj and hasattr(file_obj, "read"):
+            try:
+                result = file_obj.read()
+                if asyncio.iscoroutine(result) or asyncio.isfuture(result):
+                    result = await result
+                if isinstance(result, str):
+                    return result.encode()
+                if isinstance(result, (bytes, bytearray)):
+                    return bytes(result)
+            except Exception as err:  # pragma: no cover - защитный сценарий
+                _LOGGER.error("Ошибка чтения изображения из file-like объекта: %s", err)
+                return b""
+
+        if isinstance(upload, (bytes, bytearray)):
+            return bytes(upload)
+
+        if isinstance(upload, str):
+            return upload.encode()
+
+        _LOGGER.debug("Не удалось распознать тип загруженного файла: %s", type(upload))
+        return b""
+
+    @staticmethod
+    def _format_known_faces(names: List[str]) -> str:
+        """Собрать человекочитаемое описание известных лиц для подсказки."""
+
+        if not names:
+            return "Пока не добавлено ни одного лица."
+        return "\n".join(f"• {name}" for name in sorted(names))
+
+
+async def async_get_options_flow(
+    config_entry: config_entries.ConfigEntry,
+) -> IntersvyazOptionsFlow:
+    """Возвратить обработчик настроек для конфигурационной записи."""
+
+    return IntersvyazOptionsFlow(config_entry)
 
 
 def _normalize_message(message: Optional[str]) -> Optional[str]:

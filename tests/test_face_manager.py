@@ -10,7 +10,13 @@ import pytest
 pytest.importorskip("voluptuous", reason="Зависимость интеграции требует voluptuous")
 
 from custom_components.intersvyaz import face_manager
-from custom_components.intersvyaz.const import CONF_KNOWN_FACES, DATA_FACE_MANAGER, DOMAIN
+from custom_components.intersvyaz.const import (
+    CONF_FACE_ENCODING,
+    CONF_FACE_NAME,
+    CONF_KNOWN_FACES,
+    DATA_FACE_MANAGER,
+    DOMAIN,
+)
 from custom_components.intersvyaz.face_manager import FaceRecognitionManager
 from homeassistant.exceptions import HomeAssistantError
 
@@ -122,3 +128,33 @@ async def test_face_manager_requires_library(monkeypatch: pytest.MonkeyPatch) ->
 
     with pytest.raises(HomeAssistantError):
         await manager.async_add_known_face("Кто-то", b"data")
+
+
+def test_face_manager_lists_known_faces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Менеджер предоставляет копии списков лиц для UI и тестов."""
+
+    monkeypatch.setattr(face_manager, "face_recognition", object())
+
+    hass = SimpleNamespace(data={DOMAIN: {}})
+    entry = SimpleNamespace(
+        entry_id="entry",
+        options={
+            CONF_KNOWN_FACES: [
+                {CONF_FACE_NAME: "Гость", CONF_FACE_ENCODING: [0.1, 0.2, 0.3]}
+            ]
+        },
+    )
+
+    manager = FaceRecognitionManager(hass, entry)
+
+    names = manager.list_known_face_names()
+    faces = manager.list_known_faces()
+
+    assert names == ["Гость"]
+    assert faces[0].name == "Гость"
+
+    names.append("Друг")
+    faces.append(face_manager.KnownFace(name="Друг", encoding=[0.4]))
+
+    assert manager.list_known_face_names() == ["Гость"]
+    assert len(manager.list_known_faces()) == 1

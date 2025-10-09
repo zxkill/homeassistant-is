@@ -34,4 +34,41 @@
       "relay_data_invalid": "Сервер вернул некорректные данные домофона. Попробуйте выбрать другой адрес."
     }
   }
+  ,
+  "options": {
+    "step": {
+      "init": {
+        "title": "Распознавание лиц",
+        "description": "Текущий список лиц:\n{known_faces}\n{error_message}",
+        "menu": {
+          "options": {
+            "add_face": "Добавить лицо",
+            "remove_face": "Удалить лицо"
+          }
+        }
+      },
+      "add_face": {
+        "title": "Добавление нового лица",
+        "description": "Загрузите фотографию гостя и укажите имя.\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Имя гостя",
+          "face_image": "Фотография лица"
+        }
+      },
+      "remove_face": {
+        "title": "Удаление лица",
+        "description": "Выберите гостя, которого нужно удалить.\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Имя гостя"
+        }
+      }
+    },
+    "error": {
+      "library_missing": "Библиотека face_recognition не установлена на сервере Home Assistant.",
+      "invalid_name": "Введите корректное имя гостя.",
+      "invalid_image": "Не удалось прочитать изображение. Попробуйте другой файл.",
+      "add_failed": "Не получилось сохранить лицо. Проверьте журнал ошибок.",
+      "remove_failed": "Не удалось удалить лицо. Проверьте журнал ошибок."
+    }
+  }
 }
