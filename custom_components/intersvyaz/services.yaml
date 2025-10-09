@@ -1,0 +1,54 @@
+open_door:
+  name: Открыть домофон
+  description: Запускает процедуру открытия выбранного домофона Интерсвязи через сохранённую конфигурацию интеграции.
+  fields:
+    entry_id:
+      name: Идентификатор конфигурации
+      description: Уникальный идентификатор записи интеграции Home Assistant, полученный при настройке Intersvyaz Doorphone.
+      required: true
+      example: "a1b2c3d4e5f6g7h8"
+    door_uid:
+      name: Домофон
+      description: Уникальный идентификатор конкретного домофона. Если значение не указано, будет выбран основной подъезд.
+      required: false
+      example: "uid-main"
+
+add_known_face:
+  name: Добавить известное лицо
+  description: Сохраняет образ посетителя для автоматического открытия двери по распознаванию лиц.
+  fields:
+    entry_id:
+      name: Идентификатор конфигурации
+      description: Уникальный идентификатор записи интеграции Home Assistant.
+      required: true
+      example: "a1b2c3d4e5f6g7h8"
+    name:
+      name: Имя посетителя
+      description: Произвольное отображаемое имя, которое отобразится в настройках и логах распознавания.
+      required: true
+      example: "Алексей Петров"
+    image_url:
+      name: Ссылка на изображение
+      description: Полный URL до изображения в формате JPG или PNG. Используется, если фотография загружается по сети.
+      required: false
+      example: "https://example.com/guest.jpg"
+    image_base64:
+      name: Изображение в base64
+      description: Строка base64 с изображением. Используйте, если требуется передать фотографию напрямую в теле запроса.
+      required: false
+      example: "iVBORw0KGgoAAAANSUhEUgAA..."
+
+remove_known_face:
+  name: Удалить известное лицо
+  description: Удаляет сохранённое лицо и отключает автоматическое открытие домофона для указанного посетителя.
+  fields:
+    entry_id:
+      name: Идентификатор конфигурации
+      description: Уникальный идентификатор записи интеграции Home Assistant.
+      required: true
+      example: "a1b2c3d4e5f6g7h8"
+    name:
+      name: Имя посетителя
+      description: Имя сохранённого гостя, ранее добавленного через сервис add_known_face.
+      required: true
+      example: "Алексей Петров"
