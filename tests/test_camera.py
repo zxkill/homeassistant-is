@@ -98,6 +98,9 @@ async def test_camera_setup_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     camera = added_entities[0]
     assert camera.frame_interval == CAMERA_FRAME_INTERVAL_SECONDS
+    assert (
+        camera.image_refresh_seconds == CAMERA_FRAME_INTERVAL_SECONDS
+    ), "Интерфейс должен опрашивать снимок каждые пять секунд"
     assert camera.should_poll is False
     assert camera.device_info["identifiers"] == {(DOMAIN, entry.entry_id)}
 

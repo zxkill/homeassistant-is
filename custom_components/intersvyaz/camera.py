@@ -87,6 +87,11 @@ class IntersvyazDoorCamera(Camera):
         self._attr_name = f"Камера домофона ({address})"
         self._attr_unique_id = f"{self._door_uid}_camera"
         self._attr_frame_interval = CAMERA_FRAME_INTERVAL_SECONDS
+        # Интервал обновления изображения в интерфейсе Home Assistant.
+        # Без явного задания `image_refresh_seconds` Lovelace обновляет
+        # статичные снимки каждые 10 секунд. Указываем константу, чтобы
+        # гарантировать опрос каждые пять секунд, как и заявлено в README.
+        self._attr_image_refresh_seconds = CAMERA_FRAME_INTERVAL_SECONDS
         self._attr_should_poll = False
         # Привязываем камеру к устройству домофона, чтобы она отображалась в интеграции.
         self._attr_device_info = DeviceInfo(
@@ -109,9 +114,10 @@ class IntersvyazDoorCamera(Camera):
 
         entity_id = self.entity_id or "<entity_id не назначен>"
         _LOGGER.info(
-            "Камера домофона uid=%s зарегистрирована с entity_id=%s",
+            "Камера домофона uid=%s зарегистрирована с entity_id=%s и интервалом %s с",
             self._door_uid,
             entity_id,
+            CAMERA_FRAME_INTERVAL_SECONDS,
         )
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
