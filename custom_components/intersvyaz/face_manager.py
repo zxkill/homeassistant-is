@@ -8,7 +8,7 @@ import logging
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Iterable, List, Optional
+from typing import Awaitable, Callable, Iterable, List, Optional, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -348,8 +348,31 @@ class FaceRecognitionManager:
         update_result = self._hass.config_entries.async_update_entry(
             self._entry, options=options
         )
-        if inspect.isawaitable(update_result):
-            await update_result
+
+        # В продуктивной среде метод возвращает None/True, однако сторонние плагины или
+        # будущие версии Home Assistant могут вернуть awaitable. Более того, существует
+        # реальный кейс, когда вспомогательные обёртки помечают булево значение как
+        # awaitable (inspect.isawaitable -> True), что приводит к попытке ожидания bool
+        # и аварийному завершению сервиса. Поэтому явно обрабатываем булевые значения и
+        # любые другие синхронные результаты прежде, чем проверять признак awaitable.
+        if isinstance(update_result, bool):
+            _LOGGER.debug(
+                "Синхронное обновление опций вернуло булев результат %s", update_result
+            )
+        elif inspect.isawaitable(update_result):
+            try:
+                await cast(Awaitable[object], update_result)
+                _LOGGER.debug("Асинхронное обновление опций успешно завершилось")
+            except TypeError as err:
+                _LOGGER.warning(
+                    "Метод async_update_entry вернул объект, который нельзя ожидать: %s",
+                    err,
+                )
+        elif update_result is not None:
+            _LOGGER.debug(
+                "Метод async_update_entry вернул неожиданный синхронный результат %r",
+                update_result,
+            )
 
         _LOGGER.debug(
             "Сохранён список из %s известных лиц для записи %s",

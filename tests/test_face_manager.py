@@ -111,6 +111,52 @@ async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch
 
 
 @pytest.mark.asyncio
+async def test_face_manager_tolerates_bool_marked_awaitable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Булев результат не должен аварийно ожидаться даже при неверном isawaitable."""
+
+    fake_module = _FakeFaceRecognition()
+    monkeypatch.setattr(face_manager, "face_recognition", fake_module)
+
+    hass = SimpleNamespace(
+        data={DOMAIN: {"entry": {}}},
+        config_entries=_SyncConfigEntries(),
+    )
+
+    async def _async_add_executor_job(func, *args):
+        return func(*args)
+
+    hass.async_add_executor_job = _async_add_executor_job
+
+    # Сохраняем оригинальный isawaitable, чтобы после теста поведение осталось прежним.
+    original_isawaitable = face_manager.inspect.isawaitable
+
+    def _patched_isawaitable(value):
+        """Имитировать ошибочную маркировку булевых значений как awaitable."""
+
+        if isinstance(value, bool):
+            return True
+        return original_isawaitable(value)
+
+    monkeypatch.setattr(face_manager.inspect, "isawaitable", _patched_isawaitable)
+
+    entry = SimpleNamespace(entry_id="entry", options={})
+
+    manager = FaceRecognitionManager(hass, entry)
+
+    fake_module.encodings_queue.append([[0.5, 0.6, 0.7]])
+
+    # Если менеджер попытается ожидать bool, asyncio выбросит TypeError. Успешный вызов
+    # доказывает, что добавление лица корректно завершилось даже при некорректном
+    # определении awaitable.
+    await manager.async_add_known_face("Гость", b"sample-bytes")
+
+    assert entry.options.get(CONF_KNOWN_FACES)
+    assert hass.config_entries.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_face_manager_stores_faces_with_awaitable_update(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
