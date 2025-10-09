@@ -25,7 +25,7 @@ add_known_face:
     name:
       name: Имя посетителя
       description: Произвольное отображаемое имя, которое отобразится в настройках и логах распознавания.
-      required: true
+      required: false
       example: "Алексей Петров"
     image_url:
       name: Ссылка на изображение
@@ -37,6 +37,15 @@ add_known_face:
       description: Строка base64 с изображением. Используйте, если требуется передать фотографию напрямую в теле запроса.
       required: false
       example: "iVBORw0KGgoAAAANSUhEUgAA..."
+    faces:
+      name: Список лиц
+      description: Позволяет добавить несколько лиц сразу. Каждый элемент списка должен содержать name и один из параметров image_url или image_base64.
+      required: false
+      example: |
+        - name: "Алексей Петров"
+          image_url: "https://example.com/guest.jpg"
+        - name: "Мария Смирнова"
+          image_base64: "aGVsbG8="
 
 remove_known_face:
   name: Удалить известное лицо
