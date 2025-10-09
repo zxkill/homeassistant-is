@@ -51,6 +51,23 @@ class _FakeFaceRecognition:
         return [1.0]
 
 
+class _SyncConfigEntries:
+    """Синхронная заглушка config_entries.async_update_entry для проверки bool-результата."""
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def async_update_entry(self, entry_obj, *, data=None, options=None):
+        """Имитировать синхронное сохранение опций без возвращения awaitable."""
+
+        self.calls += 1
+        if options is not None:
+            entry_obj.options = options
+        if data is not None:
+            entry_obj.data = data
+        return True
+
+
 @pytest.mark.asyncio
 async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch) -> None:
     """Менеджер должен добавлять лица, распознавать их и удалять по запросу."""
@@ -58,17 +75,9 @@ async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch
     fake_module = _FakeFaceRecognition()
     monkeypatch.setattr(face_manager, "face_recognition", fake_module)
 
-    async def _async_update_entry(entry_obj, *, data=None, options=None):
-        if options is not None:
-            entry_obj.options = options
-        if data is not None:
-            entry_obj.data = data
-
     hass = SimpleNamespace(
         data={DOMAIN: {"entry": {}}},
-        config_entries=SimpleNamespace(
-            async_update_entry=AsyncMock(side_effect=_async_update_entry)
-        ),
+        config_entries=_SyncConfigEntries(),
     )
 
     async def _async_add_executor_job(func, *args):
@@ -83,7 +92,6 @@ async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch
     fake_module.encodings_queue.append([[0.1, 0.2, 0.3]])
 
     await manager.async_add_known_face("Гость", b"sample-bytes")
-    hass.config_entries.async_update_entry.assert_awaited_once()
     assert entry.options.get(CONF_KNOWN_FACES)
     assert hass.data[DOMAIN][entry.entry_id][DATA_FACE_MANAGER] is manager
 
@@ -99,7 +107,42 @@ async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch
 
     await manager.async_remove_known_face("Гость")
     assert not entry.options.get(CONF_KNOWN_FACES)
-    assert hass.config_entries.async_update_entry.await_count == 2
+    assert hass.config_entries.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_face_manager_stores_faces_with_awaitable_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Если update_entry возвращает awaitable, менеджер обязан его дождаться."""
+
+    fake_module = _FakeFaceRecognition()
+    monkeypatch.setattr(face_manager, "face_recognition", fake_module)
+
+    async def _async_update_entry(entry_obj, *, data=None, options=None):
+        if options is not None:
+            entry_obj.options = options
+
+    update_mock = AsyncMock(side_effect=_async_update_entry)
+
+    hass = SimpleNamespace(
+        data={DOMAIN: {"entry": {}}},
+        config_entries=SimpleNamespace(async_update_entry=update_mock),
+    )
+
+    async def _async_add_executor_job(func, *args):
+        return func(*args)
+
+    hass.async_add_executor_job = _async_add_executor_job
+
+    entry = SimpleNamespace(entry_id="entry", options={})
+
+    manager = FaceRecognitionManager(hass, entry)
+    fake_module.encodings_queue.append([[0.1, 0.2, 0.3]])
+
+    await manager.async_add_known_face("Гость", b"sample-bytes")
+
+    update_mock.assert_awaited_once()
 
 
 @pytest.mark.asyncio

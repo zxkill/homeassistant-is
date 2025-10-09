@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import inspect
 import logging
 import time
 import warnings
@@ -337,9 +338,27 @@ class FaceRecognitionManager:
     async def _async_store_faces(self) -> None:
         """Сохранить актуальный список лиц в опциях записи конфигурации."""
 
+        # Создаём копию опций, чтобы не модифицировать исходный словарь записи напрямую.
         options = dict(self._entry.options)
         options[CONF_KNOWN_FACES] = [face.as_dict() for face in self._known_faces]
-        await self._hass.config_entries.async_update_entry(self._entry, options=options)
+
+        # Метод async_update_entry в Home Assistant синхронный, однако сторонние тесты
+        # или будущие версии могут вернуть awaitable. Чтобы интеграция была устойчива,
+        # проверяем результат и ожидаем его только при необходимости.
+        update_result = self._hass.config_entries.async_update_entry(
+            self._entry, options=options
+        )
+        if inspect.isawaitable(update_result):
+            await update_result
+
+        _LOGGER.debug(
+            "Сохранён список из %s известных лиц для записи %s",
+            len(self._known_faces),
+            self._entry.entry_id,
+        )
+
+        # Обновляем кеш менеджера в hass.data, чтобы другие части интеграции
+        # могли мгновенно получить доступ к свежему экземпляру менеджера.
         domain_store = self._hass.data.setdefault(DOMAIN, {})
         entry_store = domain_store.setdefault(self._entry.entry_id, {})
         entry_store[DATA_FACE_MANAGER] = self
