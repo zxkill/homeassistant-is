@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import re
 from html import unescape
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Dict, List, Optional, cast
 
 import voluptuous as vol
 from homeassistant import config_entries
@@ -41,7 +42,7 @@ UploadFile = HassUploadFile or _UploadFileFallback  # type: ignore[assignment]
 HAS_NATIVE_UPLOAD_FILE = HassUploadFile is not None
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers import selector
+from homeassistant.helpers import config_validation as cv, selector
 
 from .api import (
     ConfirmAddress,
@@ -75,10 +76,13 @@ from .const import (
     CONF_KNOWN_FACES,
     CONF_FACE_NAME,
     CONF_FACE_IMAGE,
+    CONF_BACKGROUND_CAMERAS,
     DATA_FACE_MANAGER,
+    DATA_DOOR_OPENERS,
     DEFAULT_BUYER_ID,
     DOMAIN,
 )
+from .background import calculate_default_background_uids
 from .face_manager import FaceRecognitionManager
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.config_flow")
@@ -403,6 +407,8 @@ class IntersvyazOptionsFlow(config_entries.OptionsFlow):
         menu_options: Dict[str, str] = {"add_face": "add_face"}
         if names:
             menu_options["remove_face"] = "remove_face"
+        if self._list_video_doors():
+            menu_options["background_cameras"] = "background_cameras"
         _LOGGER.debug(
             "Отображаем меню настроек лиц для entry_id=%s (лиц: %s)",
             self._entry.entry_id,
@@ -560,6 +566,74 @@ class IntersvyazOptionsFlow(config_entries.OptionsFlow):
             data=dict(self._entry.options),
         )
 
+    async def async_step_background_cameras(
+        self, user_input: Optional[Dict[str, Any]] = None
+    ) -> FlowResult:
+        """Настроить список домофонов для фоновой обработки снимков."""
+
+        doors = self._list_video_doors()
+        if not doors:
+            _LOGGER.warning(
+                "Меню фоновой обработки открыто, но нет домофонов с поддержкой видео"
+            )
+            self._last_error = "Нет домофонов с поддержкой камеры для фонового анализа."
+            return await self.async_step_init()
+
+        choices = {
+            str(door.get("uid")): door.get("address") or str(door.get("uid"))
+            for door in doors
+        }
+
+        option_value = self._entry.options.get(CONF_BACKGROUND_CAMERAS)
+        if isinstance(option_value, list):
+            default_selection = [uid for uid in option_value if uid in choices]
+        else:
+            default_selection = calculate_default_background_uids(self._entry, doors)
+
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_BACKGROUND_CAMERAS, default=default_selection
+                ): cv.multi_select(choices)
+            }
+        )
+
+        if user_input is None:
+            return self.async_show_form(
+                step_id="background_cameras",
+                data_schema=schema,
+                description_placeholders={
+                    "available_doors": self._format_background_doors(doors),
+                    "error_message": self._last_error or "",
+                },
+            )
+
+        selected = user_input.get(CONF_BACKGROUND_CAMERAS, [])
+        if not isinstance(selected, list):
+            selected = list(selected)
+
+        options = dict(self._entry.options)
+        options[CONF_BACKGROUND_CAMERAS] = [uid for uid in selected if uid in choices]
+
+        update_result = self.hass.config_entries.async_update_entry(
+            self._entry, options=options
+        )
+        if isinstance(update_result, bool):
+            _LOGGER.debug(
+                "Метод async_update_entry синхронно вернул %s при настройке камер",
+                update_result,
+            )
+        elif inspect.isawaitable(update_result):
+            await cast(Awaitable[object], update_result)
+
+        _LOGGER.info(
+            "Для entry_id=%s сохранён список фоновой обработки домофонов: %s",
+            self._entry.entry_id,
+            ", ".join(options[CONF_BACKGROUND_CAMERAS]) or "<пусто>",
+        )
+        self._last_error = None
+        return self.async_create_entry(title="background_cameras", data=options)
+
     async def _async_resolve_face_manager(self) -> FaceRecognitionManager:
         """Получить менеджер распознавания лиц, создавая его при необходимости."""
 
@@ -622,6 +696,35 @@ class IntersvyazOptionsFlow(config_entries.OptionsFlow):
         if not names:
             return "Пока не добавлено ни одного лица."
         return "\n".join(f"• {name}" for name in sorted(names))
+
+    def _list_video_doors(self) -> List[Dict[str, Any]]:
+        """Вернуть домофоны с поддержкой камеры для настройки фоновой обработки."""
+
+        domain_store = self.hass.data.get(DOMAIN, {})
+        entry_store = domain_store.get(self._entry.entry_id, {})
+        doors = entry_store.get(DATA_DOOR_OPENERS, []) or []
+        result: List[Dict[str, Any]] = []
+        for door in doors:
+            if not isinstance(door, dict):
+                continue
+            if not door.get("has_video"):
+                continue
+            if not door.get("image_url"):
+                continue
+            if not door.get("uid"):
+                continue
+            result.append(door)
+        return result
+
+    @staticmethod
+    def _format_background_doors(doors: List[Dict[str, Any]]) -> str:
+        """Сформировать строку с перечнем домофонов для подсказки в форме."""
+
+        if not doors:
+            return "Нет доступных домофонов с камерой."
+        return "\n".join(
+            f"• {door.get('address') or door.get('uid')}" for door in doors
+        )
 
 
 async def async_get_options_flow(

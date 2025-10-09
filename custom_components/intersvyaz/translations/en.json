@@ -43,7 +43,8 @@
         "menu": {
           "options": {
             "add_face": "Add face",
-            "remove_face": "Remove face"
+            "remove_face": "Remove face",
+            "background_cameras": "Background camera processing"
           }
         }
       },
@@ -60,6 +61,13 @@
         "description": "Pick the guest that should be removed.\n{known_faces}\n{error_message}",
         "data": {
           "face_name": "Guest name"
+        }
+      },
+      "background_cameras": {
+        "title": "Background camera processing",
+        "description": "Select doorphones that should be analysed in the background.\n{available_doors}\n{error_message}",
+        "data": {
+          "background_cameras": "Doorphones for background processing"
         }
       }
     },

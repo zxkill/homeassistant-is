@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import sys
+import types
 from types import SimpleNamespace
 from typing import Any, Awaitable, Callable
 from unittest.mock import AsyncMock
@@ -17,6 +18,13 @@ if str(REPO_ROOT) not in sys.path:
     # Добавляем корень репозитория в sys.path, чтобы импортировать пакет интеграции
     # как namespace-package даже без установки через pip.
     sys.path.insert(0, str(REPO_ROOT))
+
+sys.modules.pop("custom_components.intersvyaz", None)
+sys.modules.pop("custom_components.intersvyaz.api", None)
+custom_components_module = sys.modules.setdefault(
+    "custom_components", types.ModuleType("custom_components")
+)
+custom_components_module.__path__ = [str(REPO_ROOT / "custom_components")]  # type: ignore[attr-defined]
 
 from custom_components.intersvyaz import async_setup_entry
 from custom_components.intersvyaz.api import RelayInfo, RelayOpener

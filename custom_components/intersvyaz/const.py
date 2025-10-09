@@ -9,6 +9,7 @@ DATA_OPEN_DOOR = "open_door"
 DATA_DOOR_OPENERS = "door_openers"
 DATA_DOOR_REFRESH_UNSUB = "door_refresh_unsub"
 DATA_FACE_MANAGER = "face_manager"
+DATA_BACKGROUND_PROCESSOR = "background_processor"
 
 # Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
@@ -74,6 +75,7 @@ CONF_KNOWN_FACES = "known_faces"
 CONF_FACE_NAME = "face_name"
 CONF_FACE_ENCODING = "face_encoding"
 CONF_FACE_IMAGE = "face_image"
+CONF_BACKGROUND_CAMERAS = "background_cameras"
 
 # Заголовки
 HEADER_AUTHORIZATION = "Authorization"

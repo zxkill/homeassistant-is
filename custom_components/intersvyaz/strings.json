@@ -43,7 +43,8 @@
         "menu": {
           "options": {
             "add_face": "Добавить лицо",
-            "remove_face": "Удалить лицо"
+            "remove_face": "Удалить лицо",
+            "background_cameras": "Фоновая обработка камер"
           }
         }
       },
@@ -60,6 +61,13 @@
         "description": "Выберите гостя, которого нужно удалить.\n{known_faces}\n{error_message}",
         "data": {
           "face_name": "Имя гостя"
+        }
+      },
+      "background_cameras": {
+        "title": "Фоновая обработка камер",
+        "description": "Выберите домофоны, которые будут анализироваться в фоне.\n{available_doors}\n{error_message}",
+        "data": {
+          "background_cameras": "Домофоны для фоновой обработки"
         }
       }
     },
