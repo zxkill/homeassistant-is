@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import asyncio
 import io
+import inspect
 import logging
 import time
 import warnings
 from dataclasses import dataclass, field
-from typing import Awaitable, Callable, Iterable, List, Optional
+from typing import Awaitable, Callable, Iterable, List, Optional, cast
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -337,9 +338,50 @@ class FaceRecognitionManager:
     async def _async_store_faces(self) -> None:
         """Сохранить актуальный список лиц в опциях записи конфигурации."""
 
+        # Создаём копию опций, чтобы не модифицировать исходный словарь записи напрямую.
         options = dict(self._entry.options)
         options[CONF_KNOWN_FACES] = [face.as_dict() for face in self._known_faces]
-        await self._hass.config_entries.async_update_entry(self._entry, options=options)
+
+        # Метод async_update_entry в Home Assistant синхронный, однако сторонние тесты
+        # или будущие версии могут вернуть awaitable. Чтобы интеграция была устойчива,
+        # проверяем результат и ожидаем его только при необходимости.
+        update_result = self._hass.config_entries.async_update_entry(
+            self._entry, options=options
+        )
+
+        # В продуктивной среде метод возвращает None/True, однако сторонние плагины или
+        # будущие версии Home Assistant могут вернуть awaitable. Более того, существует
+        # реальный кейс, когда вспомогательные обёртки помечают булево значение как
+        # awaitable (inspect.isawaitable -> True), что приводит к попытке ожидания bool
+        # и аварийному завершению сервиса. Поэтому явно обрабатываем булевые значения и
+        # любые другие синхронные результаты прежде, чем проверять признак awaitable.
+        if isinstance(update_result, bool):
+            _LOGGER.debug(
+                "Синхронное обновление опций вернуло булев результат %s", update_result
+            )
+        elif inspect.isawaitable(update_result):
+            try:
+                await cast(Awaitable[object], update_result)
+                _LOGGER.debug("Асинхронное обновление опций успешно завершилось")
+            except TypeError as err:
+                _LOGGER.warning(
+                    "Метод async_update_entry вернул объект, который нельзя ожидать: %s",
+                    err,
+                )
+        elif update_result is not None:
+            _LOGGER.debug(
+                "Метод async_update_entry вернул неожиданный синхронный результат %r",
+                update_result,
+            )
+
+        _LOGGER.debug(
+            "Сохранён список из %s известных лиц для записи %s",
+            len(self._known_faces),
+            self._entry.entry_id,
+        )
+
+        # Обновляем кеш менеджера в hass.data, чтобы другие части интеграции
+        # могли мгновенно получить доступ к свежему экземпляру менеджера.
         domain_store = self._hass.data.setdefault(DOMAIN, {})
         entry_store = domain_store.setdefault(self._entry.entry_id, {})
         entry_store[DATA_FACE_MANAGER] = self
