@@ -36,12 +36,16 @@ from custom_components.intersvyaz.const import (
     DATA_COORDINATOR,
     DATA_DOOR_OPENERS,
     DATA_DOOR_REFRESH_UNSUB,
+    DATA_FACE_MANAGER,
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOOR_LINK_REFRESH_INTERVAL_HOURS,
     DOMAIN,
+    SERVICE_ADD_KNOWN_FACE,
     SERVICE_OPEN_DOOR,
+    SERVICE_REMOVE_KNOWN_FACE,
 )
+from custom_components.intersvyaz.face_manager import FaceRecognitionManager
 
 
 class _DummyEntry:
@@ -50,6 +54,7 @@ class _DummyEntry:
     def __init__(self, data: dict[str, Any]) -> None:
         self.entry_id = "test-entry"
         self.data = data
+        self.options: dict[str, Any] = {}
 
 
 class _DummyServices:
@@ -223,6 +228,7 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
     assert DATA_COORDINATOR in stored
     assert DATA_CONFIG in stored
     assert callable(stored[DATA_OPEN_DOOR])
+    assert isinstance(stored[DATA_FACE_MANAGER], FaceRecognitionManager)
 
     door_openers = stored[DATA_DOOR_OPENERS]
     assert len(door_openers) == 2, "Ожидаем отдельную кнопку для каждого домофона"
@@ -233,6 +239,8 @@ async def test_async_setup_entry_registers_open_door(monkeypatch: pytest.MonkeyP
 
     # Сервис открытия двери должен быть зарегистрирован в Home Assistant.
     assert hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR)
+    assert hass.services.has_service(DOMAIN, SERVICE_ADD_KNOWN_FACE)
+    assert hass.services.has_service(DOMAIN, SERVICE_REMOVE_KNOWN_FACE)
 
     # Запуск колбэка не должен приводить к ошибке и обязан дергать API клиента.
     await stored[DATA_OPEN_DOOR]()

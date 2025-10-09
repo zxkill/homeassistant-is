@@ -16,6 +16,8 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from .const import (
     CAMERA_FRAME_INTERVAL_SECONDS,
     DATA_DOOR_OPENERS,
+    DATA_FACE_MANAGER,
+    DATA_OPEN_DOOR,
     DOMAIN,
 )
 
@@ -148,4 +150,26 @@ class IntersvyazDoorCamera(Camera):
             self._door_uid,
             len(data),
         )
+
+        await self._async_try_face_recognition(data)
         return data
+
+    async def _async_try_face_recognition(self, image: bytes) -> None:
+        """Запустить распознавание лиц для текущего домофона, если оно включено."""
+
+        domain_store = self._hass.data.get(DOMAIN, {})
+        entry_store = domain_store.get(self._entry.entry_id)
+        if not entry_store:
+            _LOGGER.debug(
+                "Не удалось выполнить распознавание лиц для uid=%s: нет данных entry", self._door_uid
+            )
+            return
+        manager = entry_store.get(DATA_FACE_MANAGER)
+        if not manager:
+            _LOGGER.debug(
+                "Распознавание лиц не настроено для entry_id=%s", self._entry.entry_id
+            )
+            return
+        door_entry = self._current_entry()
+        open_callback = door_entry.get("callback") or entry_store.get(DATA_OPEN_DOOR)
+        await manager.async_process_image(self._door_uid, image, open_callback)

@@ -17,6 +17,8 @@ from custom_components.intersvyaz.camera import IntersvyazDoorCamera, async_setu
 from custom_components.intersvyaz.const import (
     CAMERA_FRAME_INTERVAL_SECONDS,
     DATA_DOOR_OPENERS,
+    DATA_FACE_MANAGER,
+    DATA_OPEN_DOOR,
     DOMAIN,
 )
 
@@ -57,7 +59,23 @@ async def test_camera_setup_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
         "has_video": True,
         "image_url": "https://snapshots.example/initial.jpg",
     }
-    hass = SimpleNamespace(data={DOMAIN: {"test-entry": {DATA_DOOR_OPENERS: [door_entry]}}})
+    fake_manager_calls: list[tuple[str, bytes]] = []
+
+    class _DummyFaceManager:
+        async def async_process_image(self, door_uid: str, image: bytes, _callback: Any) -> None:
+            fake_manager_calls.append((door_uid, image))
+
+    hass = SimpleNamespace(
+        data={
+            DOMAIN: {
+                "test-entry": {
+                    DATA_DOOR_OPENERS: [door_entry],
+                    DATA_FACE_MANAGER: _DummyFaceManager(),
+                    DATA_OPEN_DOOR: lambda: None,
+                }
+            }
+        }
+    )
     entry = SimpleNamespace(entry_id="test-entry")
 
     added_entities: List[IntersvyazDoorCamera] = []
@@ -88,6 +106,9 @@ async def test_camera_setup_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     image = await camera.async_camera_image()
     assert image == b"new-bytes"
     assert dummy_session.requested[-1] == "https://snapshots.example/updated.jpg"
+    assert fake_manager_calls, "Менеджер распознавания должен получать кадры"
+    assert fake_manager_calls[-1][0] == "entry_door_camera"
+    assert fake_manager_calls[-1][1] == b"new-bytes"
 
 
 @pytest.mark.asyncio

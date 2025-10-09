@@ -1,10 +1,14 @@
 """Точка входа интеграции Intersvyaz для Home Assistant."""
 from __future__ import annotations
 
+import asyncio
+import base64
+import binascii
 import logging
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
+from aiohttp import ClientError
 import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
@@ -34,13 +38,17 @@ from .const import (
     DATA_COORDINATOR,
     DATA_DOOR_OPENERS,
     DATA_DOOR_REFRESH_UNSUB,
+    DATA_FACE_MANAGER,
     DATA_OPEN_DOOR,
     DEFAULT_BUYER_ID,
     DOOR_LINK_REFRESH_INTERVAL_HOURS,
     DOMAIN,
     LOGGER_NAME,
+    SERVICE_ADD_KNOWN_FACE,
     SERVICE_OPEN_DOOR,
+    SERVICE_REMOVE_KNOWN_FACE,
 )
+from .face_manager import FaceRecognitionManager
 
 _LOGGER = logging.getLogger(LOGGER_NAME)
 
@@ -50,6 +58,22 @@ SERVICE_OPEN_DOOR_SCHEMA = vol.Schema(
     {
         vol.Required("entry_id"): cv.string,
         vol.Optional("door_uid"): cv.string,
+    }
+)
+
+ADD_KNOWN_FACE_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): cv.string,
+        vol.Required("name"): cv.string,
+        vol.Optional("image_url"): cv.string,
+        vol.Optional("image_base64"): cv.string,
+    }
+)
+
+REMOVE_KNOWN_FACE_SCHEMA = vol.Schema(
+    {
+        vol.Required("entry_id"): cv.string,
+        vol.Required("name"): cv.string,
     }
 )
 
@@ -203,6 +227,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         DATA_DOOR_REFRESH_UNSUB: None,
     }
 
+    face_manager = FaceRecognitionManager(hass, entry)
+    hass.data[DOMAIN][entry.entry_id][DATA_FACE_MANAGER] = face_manager
+
     _sync_config_with_primary_door(hass, entry, door_openers)
 
     async def _scheduled_refresh(_now=None) -> None:
@@ -287,6 +314,101 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             schema=SERVICE_OPEN_DOOR_SCHEMA,
         )
 
+    if not hass.services.has_service(DOMAIN, SERVICE_ADD_KNOWN_FACE):
+
+        async def handle_add_known_face(call: ServiceCall) -> None:
+            """Сохранить новое лицо для автоматического открытия домофона."""
+
+            service_entry_id = call.data["entry_id"]
+            name = call.data["name"]
+            image_url = call.data.get("image_url")
+            image_base64 = call.data.get("image_base64")
+
+            if not image_url and not image_base64:
+                raise HomeAssistantError(
+                    "Укажите image_url или image_base64 для загрузки фотографии лица"
+                )
+            if image_url and image_base64:
+                raise HomeAssistantError(
+                    "Нужно указать только один источник изображения: URL или base64"
+                )
+
+            domain_data = hass.data.get(DOMAIN, {})
+            entry_storage = domain_data.get(service_entry_id)
+            if not entry_storage:
+                raise HomeAssistantError(
+                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
+                )
+
+            face_manager: FaceRecognitionManager | None = entry_storage.get(
+                DATA_FACE_MANAGER
+            )
+            if not face_manager:
+                raise HomeAssistantError(
+                    "Распознавание лиц не инициализировано для указанной записи"
+                )
+
+            if image_url:
+                session = async_get_clientsession(hass)
+                try:
+                    async with session.get(image_url) as response:
+                        if response.status != 200:
+                            raise HomeAssistantError(
+                                f"Не удалось загрузить изображение по URL: статус {response.status}"
+                            )
+                        image_bytes = await response.read()
+                except (ClientError, asyncio.TimeoutError) as err:
+                    raise HomeAssistantError(
+                        f"Ошибка загрузки изображения по URL {image_url}: {err}"
+                    ) from err
+            else:
+                try:
+                    image_bytes = base64.b64decode(image_base64, validate=True)
+                except (binascii.Error, ValueError) as err:
+                    raise HomeAssistantError(
+                        "Не удалось декодировать image_base64, проверьте строку"
+                    ) from err
+
+            await face_manager.async_add_known_face(name, image_bytes)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_ADD_KNOWN_FACE,
+            handle_add_known_face,
+            schema=ADD_KNOWN_FACE_SCHEMA,
+        )
+
+    if not hass.services.has_service(DOMAIN, SERVICE_REMOVE_KNOWN_FACE):
+
+        async def handle_remove_known_face(call: ServiceCall) -> None:
+            """Удалить сохранённое лицо и сбросить автоматическое открытие."""
+
+            service_entry_id = call.data["entry_id"]
+            name = call.data["name"]
+            domain_data = hass.data.get(DOMAIN, {})
+            entry_storage = domain_data.get(service_entry_id)
+            if not entry_storage:
+                raise HomeAssistantError(
+                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
+                )
+
+            face_manager: FaceRecognitionManager | None = entry_storage.get(
+                DATA_FACE_MANAGER
+            )
+            if not face_manager:
+                raise HomeAssistantError(
+                    "Распознавание лиц не инициализировано для указанной записи"
+                )
+
+            await face_manager.async_remove_known_face(name)
+
+        hass.services.async_register(
+            DOMAIN,
+            SERVICE_REMOVE_KNOWN_FACE,
+            handle_remove_known_face,
+            schema=REMOVE_KNOWN_FACE_SCHEMA,
+        )
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     _LOGGER.info("Интеграция Intersvyaz успешно настроена")
     return True
@@ -304,6 +426,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsubscribe = entry_store.get(DATA_DOOR_REFRESH_UNSUB)
         if callable(unsubscribe):
             unsubscribe()
+        entry_store.pop(DATA_FACE_MANAGER, None)
     if not domain_store:
         hass.services.async_remove(DOMAIN, SERVICE_OPEN_DOOR)
         hass.data.pop(DOMAIN, None)
