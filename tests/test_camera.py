@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, List
+from typing import Any, List
 
 import pytest
 
@@ -80,6 +80,8 @@ async def test_camera_setup_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
 
     camera = added_entities[0]
     assert camera.frame_interval == CAMERA_FRAME_INTERVAL_SECONDS
+    assert camera.should_poll is False
+    assert camera.device_info["identifiers"] == {(DOMAIN, entry.entry_id)}
 
     # Обновляем ссылку в door_entry, имитируя работу обновления домофонов.
     door_entry["image_url"] = "https://snapshots.example/updated.jpg"

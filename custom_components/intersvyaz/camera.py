@@ -10,6 +10,7 @@ from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -84,6 +85,12 @@ class IntersvyazDoorCamera(Camera):
         self._attr_name = f"Камера домофона ({address})"
         self._attr_unique_id = f"{self._door_uid}_camera"
         self._attr_frame_interval = CAMERA_FRAME_INTERVAL_SECONDS
+        self._attr_should_poll = False
+        # Привязываем камеру к устройству домофона, чтобы она отображалась в интеграции.
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name="Домофон Интерсвязь",
+        )
 
     def _current_entry(self) -> Dict[str, Any]:
         """Получить актуальный словарь домофона из хранилища Home Assistant."""
@@ -94,6 +101,16 @@ class IntersvyazDoorCamera(Camera):
             if door.get("uid") == self._door_uid:
                 return door
         return self._door_entry
+
+    async def async_added_to_hass(self) -> None:
+        """Залогировать регистрацию камеры для облегчения диагностики."""
+
+        entity_id = self.entity_id or "<entity_id не назначен>"
+        _LOGGER.info(
+            "Камера домофона uid=%s зарегистрирована с entity_id=%s",
+            self._door_uid,
+            entity_id,
+        )
 
     async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
         """Запросить снимок домофона, гарантируя подробное логирование."""
