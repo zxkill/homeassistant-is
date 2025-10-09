@@ -128,10 +128,16 @@ def test_background_processor_fetches_selected_door(monkeypatch: pytest.MonkeyPa
         await processor.async_setup()
         assert processor.selected_uids == {"door-1"}
         assert isinstance(scheduled.get("interval"), timedelta)
+        # Убеждаемся, что планировщик получил корутину и её можно безопасно вызывать.
+        assert asyncio.iscoroutinefunction(scheduled["action"])  # type: ignore[arg-type]
+        await scheduled["action"](None)
 
         await processor.async_force_cycle()
 
-        assert dummy_session.requested == ["https://snapshots.example/door-1.jpg"]
+        assert dummy_session.requested == [
+            "https://snapshots.example/door-1.jpg",
+            "https://snapshots.example/door-1.jpg",
+        ]
         manager = hass.data[DOMAIN]["entry"][DATA_FACE_MANAGER]
         assert manager.calls
         assert manager.calls[-1][0] == "door-1"

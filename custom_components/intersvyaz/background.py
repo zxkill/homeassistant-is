@@ -160,9 +160,13 @@ class DoorBackgroundProcessor:
             self._entry.entry_id,
             ", ".join(sorted(self._selected_uids)),
         )
+        # Используем асинхронный обработчик, чтобы `async_track_time_interval`
+        # выполнял вызов непосредственно в event loop Home Assistant без
+        # дополнительного порождения задач из потоков исполнителя. Это
+        # предотвращает предупреждения о небезопасном доступе к `hass`.
         self._unsubscribe = self._scheduler(
             self._hass,
-            lambda now: self._hass.async_create_task(self._async_process_selected()),
+            self._async_schedule_handler,
             timedelta(seconds=self._interval),
         )
 
@@ -181,6 +185,23 @@ class DoorBackgroundProcessor:
                 continue
             result[uid] = door
         return result
+
+    async def _async_schedule_handler(self, now: Optional[Any]) -> None:
+        """Обработать срабатывание таймера фоновой обработки.
+
+        Метод вызывается напрямую из планировщика Home Assistant и всегда
+        работает внутри его event loop, поэтому можно безопасно ожидать
+        выполнение фонового цикла без дополнительных `async_create_task`.
+        В логах фиксируем время события, чтобы отслеживать стабильность
+        расписания.
+        """
+
+        _LOGGER.debug(
+            "Таймер фонового цикла для entry_id=%s сработал в момент: %s",
+            self._entry.entry_id,
+            now,
+        )
+        await self._async_process_selected()
 
     async def _async_process_selected(self) -> None:
         """Загрузить снимки для всех выбранных домофонов и запустить распознавание."""
