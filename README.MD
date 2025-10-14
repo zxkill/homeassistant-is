@@ -18,7 +18,6 @@
 - Тесты `pytest`, эмулирующие облачное API и покрывающие ключевую бизнес-логику.
 
 ## Установка
-[![Open your Home Assistant instance and show the add add-on repository dialog with a specific repository URL pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fzxkill%2Fhomeassistant-is)
 1. Установите Home Assistant 2023.5+.
 2. Через [HACS](https://hacs.xyz/) добавьте репозиторий как **Custom Repository** (категория *Integration*) либо вручную скопируйте `custom_components/intersvyaz` в каталог `config/custom_components`.
 3. Перезапустите Home Assistant, затем добавьте интеграцию **Intersvyaz Doorphone** в разделе «Настройки → Устройства и службы».
