@@ -40,6 +40,7 @@ ADD_FACE_SCHEMA = vol.Schema(
     {
         vol.Required("entry_id"): cv.string,
         vol.Optional("name"): cv.string,
+        vol.Optional("person_entity_id"): cv.entity_id,
         vol.Optional("image_url"): cv.string,
         vol.Optional("image_base64"): cv.string,
         vol.Optional("faces"): list,
@@ -49,7 +50,8 @@ ADD_FACE_SCHEMA = vol.Schema(
 REMOVE_FACE_SCHEMA = vol.Schema(
     {
         vol.Required("entry_id"): cv.string,
-        vol.Required("name"): cv.string,
+        vol.Optional("name"): cv.string,
+        vol.Optional("person_entity_id"): cv.entity_id,
     }
 )
 
@@ -122,23 +124,42 @@ async def _handle_add_face(hass: HomeAssistant, call: ServiceCall) -> None:
     for item in items:
         image = await _load_image(hass, item)
         await entry.runtime_data.face_manager.async_add_known_face(
-            str(item["name"]), image
+            str(item.get("name") or ""),
+            image,
+            person_entity_id=(
+                str(item.get("person_entity_id"))
+                if item.get("person_entity_id")
+                else None
+            ),
         )
     await entry.runtime_data.background_processor.async_refresh_from_options()
 
 
 async def _handle_remove_face(hass: HomeAssistant, call: ServiceCall) -> None:
     entry = _get_entry(hass, str(call.data["entry_id"]))
-    name = str(call.data["name"]).strip()
-    _LOGGER.info("Action remove_known_face: entry_id=%s", entry.entry_id)
-    await entry.runtime_data.face_manager.async_remove_known_face(name)
+    person_entity_id = str(call.data.get("person_entity_id") or "").strip()
+    name = str(call.data.get("name") or "").strip()
+    identifier = person_entity_id or name
+    if not identifier:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN, translation_key="face_identity_required"
+        )
+    _LOGGER.info(
+        "Action remove_known_face: entry_id=%s by_person=%s",
+        entry.entry_id,
+        bool(person_entity_id),
+    )
+    await entry.runtime_data.face_manager.async_remove_known_face(identifier)
     await entry.runtime_data.background_processor.async_refresh_from_options()
 
 
 def _normalize_faces(data: dict[str, Any]) -> list[dict[str, Any]]:
     faces = data.get("faces")
     if faces:
-        if any(data.get(key) for key in ("name", "image_url", "image_base64")):
+        if any(
+            data.get(key)
+            for key in ("name", "person_entity_id", "image_url", "image_base64")
+        ):
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="mixed_face_payload")
         if not isinstance(faces, list):
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="faces_must_be_list")
@@ -147,6 +168,7 @@ def _normalize_faces(data: dict[str, Any]) -> list[dict[str, Any]]:
         items = [
             {
                 "name": data.get("name"),
+                "person_entity_id": data.get("person_entity_id"),
                 "image_url": data.get("image_url"),
                 "image_base64": data.get("image_base64"),
             }
@@ -157,16 +179,29 @@ def _normalize_faces(data: dict[str, Any]) -> list[dict[str, Any]]:
         if not isinstance(item, dict):
             raise ServiceValidationError(translation_domain=DOMAIN, translation_key="face_item_invalid")
         name = str(item.get("name") or "").strip()
+        person_entity_id = str(item.get("person_entity_id") or "").strip()
         has_url = bool(item.get("image_url"))
         has_base64 = bool(item.get("image_base64"))
-        if not name:
-            raise ServiceValidationError(translation_domain=DOMAIN, translation_key="face_name_required")
+        if not name and not person_entity_id:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="face_identity_required"
+            )
+        if person_entity_id and not person_entity_id.startswith("person."):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="face_person_invalid"
+            )
         if has_url == has_base64:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="face_source_required",
             )
-        normalized.append({**item, "name": name})
+        normalized.append(
+            {
+                **item,
+                "name": name,
+                "person_entity_id": person_entity_id or None,
+            }
+        )
     return normalized
 
 

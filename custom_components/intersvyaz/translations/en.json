@@ -74,13 +74,15 @@
           "recognition_settings": "Recognition and auto-open",
           "add_face": "Add face",
           "remove_face": "Remove face",
-          "background_cameras": "Background analysis cameras"
+          "background_cameras": "Background analysis cameras",
+          "link_face": "Link existing face"
         },
         "menu_option_descriptions": {
           "recognition_settings": "Configure recognition mode, match threshold, confirmation and safe automatic door opening.",
           "add_face": "Upload a photo and add a person to the local recognition database.",
           "remove_face": "Remove a previously added person and the locally stored biometric descriptor.",
-          "background_cameras": "Choose intercom cameras whose snapshots will be analyzed in the background."
+          "background_cameras": "Choose intercom cameras whose snapshots will be analyzed in the background.",
+          "link_face": "Link a face enrolled by an older version to an existing Home Assistant Person entity."
         }
       },
       "recognition_settings": {
@@ -103,13 +105,13 @@
       },
       "add_face": {
         "title": "Add face",
-        "description": "Use a frontal photo containing exactly one person.\n\nKnown faces:\n{known_faces}\n{error_message}",
+        "description": "Select an existing Home Assistant Person and upload a frontal photo containing exactly one person.\n\nKnown faces:\n{known_faces}\n{error_message}",
         "data": {
-          "face_name": "Name",
+          "face_person_entity_id": "Home Assistant person",
           "face_image": "Photo"
         },
         "data_description": {
-          "face_name": "Name exposed in recognition events and the last visitor sensor.",
+          "face_person_entity_id": "The recognition identity will be linked to this person.",
           "face_image": "JPG/PNG containing one clearly visible face."
         }
       },
@@ -132,11 +134,24 @@
         "data_description": {
           "background_cameras": "Cameras the integration will analyze in the background."
         }
+      },
+      "link_face": {
+        "title": "Link existing face",
+        "description": "Faces enrolled before 2.0.9 can be linked without recalculating their descriptor.\n\nUnlinked faces:\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Existing face",
+          "face_person_entity_id": "Home Assistant person"
+        },
+        "data_description": {
+          "face_name": "Local descriptor to link.",
+          "face_person_entity_id": "Existing person."
+        }
       }
     },
     "error": {
       "add_failed": "Could not add the face. See Home Assistant logs.",
-      "remove_failed": "Could not remove the face. See Home Assistant logs."
+      "remove_failed": "Could not remove the face. See Home Assistant logs.",
+      "link_failed": "Could not link the face. See Home Assistant logs."
     }
   },
   "entity": {
@@ -210,6 +225,12 @@
     },
     "invalid_image_url": {
       "message": "image_url must be an absolute HTTP or HTTPS URL."
+    },
+    "face_identity_required": {
+      "message": "A name or Home Assistant person is required for every face."
+    },
+    "face_person_invalid": {
+      "message": "person_entity_id must point to a Person entity."
     }
   },
   "services": {
@@ -238,6 +259,10 @@
           "name": "Name",
           "description": "Name for single-face mode."
         },
+        "person_entity_id": {
+          "name": "Home Assistant person",
+          "description": "Optional person entity to link this face to. When set, its current friendly name is used."
+        },
         "image_url": {
           "name": "Photo URL",
           "description": "Absolute HTTP/HTTPS URL of the image."
@@ -254,13 +279,18 @@
     },
     "remove_known_face": {
       "name": "Remove known face",
-      "description": "Removes a face from the local recognition database.",
+      "description": "Removes a face from the local recognition database by name or linked Home Assistant Person.",
       "fields": {
         "entry_id": {
           "name": "Intersvyaz account"
         },
         "name": {
-          "name": "Name"
+          "name": "Name",
+          "description": "Legacy/fallback face name."
+        },
+        "person_entity_id": {
+          "name": "Home Assistant person",
+          "description": "Linked Person entity whose face should be removed."
         }
       }
     }

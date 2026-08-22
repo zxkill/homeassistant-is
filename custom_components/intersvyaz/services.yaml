@@ -32,6 +32,13 @@ add_known_face:
       required: false
       selector:
         text:
+    person_entity_id:
+      name: Человек Home Assistant
+      description: Необязательная сущность Person, с которой нужно связать распознаваемое лицо.
+      required: false
+      selector:
+        entity:
+          domain: person
     image_url:
       name: URL фотографии
       description: HTTPS/HTTP URL изображения для одиночного добавления.
@@ -48,10 +55,10 @@ add_known_face:
           multiline: true
     faces:
       name: Несколько лиц
-      description: Список объектов name + ровно один из image_url/image_base64.
+      description: Список объектов с name и/или person_entity_id + ровно один из image_url/image_base64.
       required: false
       example: |
-        - name: "Алексей"
+        - person_entity_id: "person.aleksei"
           image_url: "https://example.org/alexey.jpg"
         - name: "Мария"
           image_base64: "/9j/4AAQSk..."
@@ -70,6 +77,14 @@ remove_known_face:
           integration: intersvyaz
     name:
       name: Имя
-      required: true
+      description: Для старых сценариев; можно вместо этого указать человека Home Assistant.
+      required: false
       selector:
         text:
+    person_entity_id:
+      name: Человек Home Assistant
+      description: Сущность Person, чьё лицо нужно удалить из локальной базы.
+      required: false
+      selector:
+        entity:
+          domain: person

@@ -18,6 +18,7 @@ from .const import (
     CONF_FACE_EVENT_COOLDOWN_SECONDS,
     CONF_FACE_IMAGE,
     CONF_FACE_NAME,
+    CONF_FACE_PERSON_ENTITY_ID,
     CONF_RECOGNITION_MODE,
     CONF_RECOGNITION_REQUIRED_MATCHES,
     CONF_RECOGNITION_THRESHOLD,
@@ -82,6 +83,8 @@ class IntersvyazOptionsFlow(OptionsFlow):
         manager = self._typed_entry.runtime_data.face_manager
         names = manager.list_known_face_names()
         menu_options = ["recognition_settings", "add_face"]
+        if manager.list_unlinked_faces():
+            menu_options.append("link_face")
         if names:
             menu_options.append("remove_face")
         runtime = self._typed_entry.runtime_data
@@ -226,13 +229,15 @@ class IntersvyazOptionsFlow(OptionsFlow):
     async def async_step_add_face(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Добавить лицо через штатный FileSelector Home Assistant."""
+        """Добавить фотографию и связать descriptor с Person Home Assistant."""
 
         manager = self._typed_entry.runtime_data.face_manager
         errors: dict[str, str] = {}
         schema = vol.Schema(
             {
-                vol.Required(CONF_FACE_NAME): selector.TextSelector(),
+                vol.Required(CONF_FACE_PERSON_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="person")
+                ),
                 vol.Required(CONF_FACE_IMAGE): selector.FileSelector(
                     selector.FileSelectorConfig(
                         accept=".jpg,.jpeg,.png,image/jpeg,image/png"
@@ -242,18 +247,39 @@ class IntersvyazOptionsFlow(OptionsFlow):
         )
 
         if user_input is not None:
-            name = str(user_input.get(CONF_FACE_NAME, "")).strip()
+            person_entity_id = str(
+                user_input.get(CONF_FACE_PERSON_ENTITY_ID, "")
+            ).strip()
             upload_id = user_input.get(CONF_FACE_IMAGE)
+            state = self.hass.states.get(person_entity_id)
+            name = (
+                str(state.attributes.get("friendly_name") or person_entity_id)
+                if state is not None
+                else person_entity_id
+            )
             try:
                 image_bytes = await self.hass.async_add_executor_job(
                     self._read_uploaded_file, str(upload_id)
                 )
-                await manager.async_add_known_face(name, image_bytes)
+                await manager.async_add_known_face(
+                    name,
+                    image_bytes,
+                    person_entity_id=person_entity_id,
+                )
             except (HomeAssistantError, OSError, ValueError) as err:
-                _LOGGER.warning("Не удалось добавить лицо: %s", err)
+                _LOGGER.warning(
+                    "[OPTIONS_FLOW][ADD_FACE_FAILED] entry_id=%s person_selected=%s error=%s",
+                    self._entry.entry_id,
+                    bool(person_entity_id),
+                    err,
+                )
                 self._last_error = str(err)
                 errors["base"] = "add_failed"
             else:
+                _LOGGER.info(
+                    "[OPTIONS_FLOW][ADD_FACE_OK] entry_id=%s linked_to_person=true",
+                    self._entry.entry_id,
+                )
                 self._last_error = None
                 await self._typed_entry.runtime_data.background_processor.async_refresh_from_options()
                 return await self.async_step_init()
@@ -268,21 +294,85 @@ class IntersvyazOptionsFlow(OptionsFlow):
             },
         )
 
+    async def async_step_link_face(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Связать descriptor из предыдущей версии с Person Home Assistant."""
+
+        manager = self._typed_entry.runtime_data.face_manager
+        choices = manager.face_choices(only_unlinked=True)
+        if not choices:
+            return await self.async_step_init()
+
+        errors: dict[str, str] = {}
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_FACE_NAME): selector.SelectSelector(
+                    selector.SelectSelectorConfig(
+                        options=[
+                            selector.SelectOptionDict(value=value, label=label)
+                            for value, label in choices.items()
+                        ],
+                        mode=selector.SelectSelectorMode.DROPDOWN,
+                    )
+                ),
+                vol.Required(CONF_FACE_PERSON_ENTITY_ID): selector.EntitySelector(
+                    selector.EntitySelectorConfig(domain="person")
+                ),
+            }
+        )
+
+        if user_input is not None:
+            identity_key = str(user_input.get(CONF_FACE_NAME, "")).strip()
+            person_entity_id = str(
+                user_input.get(CONF_FACE_PERSON_ENTITY_ID, "")
+            ).strip()
+            try:
+                await manager.async_link_known_face(identity_key, person_entity_id)
+            except HomeAssistantError as err:
+                _LOGGER.warning(
+                    "[OPTIONS_FLOW][LINK_FACE_FAILED] entry_id=%s error=%s",
+                    self._entry.entry_id,
+                    err,
+                )
+                self._last_error = str(err)
+                errors["base"] = "link_failed"
+            else:
+                _LOGGER.info(
+                    "[OPTIONS_FLOW][LINK_FACE_OK] entry_id=%s linked_to_person=true",
+                    self._entry.entry_id,
+                )
+                self._last_error = None
+                return await self.async_step_init()
+
+        return self.async_show_form(
+            step_id="link_face",
+            data_schema=schema,
+            errors=errors,
+            description_placeholders={
+                "known_faces": self._format_names(list(choices.values())),
+                "error_message": self._last_error or "",
+            },
+        )
+
     async def async_step_remove_face(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Удалить ранее добавленное лицо."""
 
         manager = self._typed_entry.runtime_data.face_manager
-        names = manager.list_known_face_names()
-        if not names:
+        choices = manager.face_choices()
+        if not choices:
             return await self.async_step_init()
 
         schema = vol.Schema(
             {
                 vol.Required(CONF_FACE_NAME): selector.SelectSelector(
                     selector.SelectSelectorConfig(
-                        options=sorted(names),
+                        options=[
+                            selector.SelectOptionDict(value=value, label=label)
+                            for value, label in choices.items()
+                        ],
                         mode=selector.SelectSelectorMode.DROPDOWN,
                     )
                 )
@@ -290,9 +380,9 @@ class IntersvyazOptionsFlow(OptionsFlow):
         )
         errors: dict[str, str] = {}
         if user_input is not None:
-            name = str(user_input.get(CONF_FACE_NAME, ""))
+            identifier = str(user_input.get(CONF_FACE_NAME, ""))
             try:
-                await manager.async_remove_known_face(name)
+                await manager.async_remove_known_face(identifier)
             except HomeAssistantError as err:
                 self._last_error = str(err)
                 errors["base"] = "remove_failed"
@@ -306,7 +396,7 @@ class IntersvyazOptionsFlow(OptionsFlow):
             data_schema=schema,
             errors=errors,
             description_placeholders={
-                "known_faces": self._format_names(names),
+                "known_faces": self._format_names(list(choices.values())),
                 "error_message": self._last_error or "",
             },
         )
