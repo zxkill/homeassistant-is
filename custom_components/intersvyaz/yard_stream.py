@@ -18,7 +18,6 @@ from .const import (
     YARD_STREAM_PROBE_TIMEOUT_SECONDS,
 )
 from .models import YardCameraRuntime
-from .yard_hls_utils import build_upstream_headers
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_stream")
 
@@ -40,9 +39,9 @@ class YardStreamResolver:
     ) -> str | None:
         """Вернуть первый доступный HLS источник.
 
-        Обычный MAIN проверяется первым как наиболее совместимый HLS источник.
-        LOW_LATENCY остаётся fallback: официальный клиент умеет его проигрывать,
-        но сторонние ffmpeg/go2rtc реализации поддерживают LL-HLS неодинаково.
+        Используется только обычный MEDIA.HLS.LIVE.MAIN. Реальная диагностика
+        CDN показала, что это стандартный rolling HLS; LOW_LATENCY/realtime=1
+        намеренно не передаётся в стандартный PyAV/go2rtc pipeline Home Assistant.
         """
 
         now = time.monotonic()
@@ -50,11 +49,18 @@ class YardStreamResolver:
         if not force and cached and cached[1] > now:
             return cached[0]
 
-        candidates = (
-            ("main", camera.hls_url),
-            ("low_latency", camera.low_latency_hls_url),
-        )
+        # Реальный запрос к CDN показал, что MEDIA.HLS.LIVE.MAIN — обычный
+        # rolling HLS (несколько TS-сегментов, растущий MEDIA-SEQUENCE, без
+        # ENDLIST). LOW_LATENCY с realtime=1 через PyAV/go2rtc нестабилен,
+        # поэтому сознательно не используем его как fallback стандартного
+        # CameraEntityFeature.STREAM.
+        candidates = (("main", camera.hls_url),)
         camera_ref = _safe_camera_ref(camera.uid)
+        if not camera.hls_url and camera.low_latency_hls_url:
+            _LOGGER.warning(
+                "[YARD_STREAM][LOW_LATENCY_ONLY] camera=%s standard_main=false",
+                camera_ref,
+            )
 
         for mode, url in candidates:
             if not url:
@@ -82,10 +88,9 @@ class YardStreamResolver:
             async with asyncio.timeout(YARD_STREAM_PROBE_TIMEOUT_SECONDS):
                 async with self._session.get(
                     url,
-                    headers=build_upstream_headers(
-                        url,
-                        accept="application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
-                    ),
+                    headers={
+                        "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                    },
                     allow_redirects=True,
                 ) as response:
                     # Master playlist маленький. Ограничиваем чтение, чтобы probe

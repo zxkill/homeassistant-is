@@ -111,13 +111,17 @@ def test_yard_camera_matching_never_falls_back_to_porch_only(component_root):
     assert "Никогда не сопоставляем только по номеру подъезда" in source
 
 
-def test_yard_stream_resolver_validates_playlist_and_prefers_realtime(component_root):
+def test_yard_stream_resolver_validates_standard_main_playlist(component_root):
     source = (component_root / "yard_stream.py").read_text()
-    assert '"low_latency", camera.low_latency_hls_url' in source
-    assert '"main", camera.hls_url' in source
+    assert 'candidates = (("main", camera.hls_url),)' in source
+    assert 'camera.low_latency_hls_url' in source
+    assert '[YARD_STREAM][LOW_LATENCY_ONLY]' in source
     assert 'b"#EXTM3U"' in source
     assert "[YARD_STREAM][PROBE]" in source
-    assert "url" not in source.split("[YARD_STREAM][PROBE]")[1].split("return response.status", 1)[0]
+    assert "build_upstream_headers" not in source
+    assert '"Authorization"' not in source
+    assert '"Origin"' not in source
+    assert '"Referer"' not in source
 
 
 def test_stream_source_refreshes_expired_media_urls(component_root):
@@ -127,26 +131,17 @@ def test_stream_source_refreshes_expired_media_urls(component_root):
     assert "await self.async_refresh()" in manager
 
 
-def test_yard_stream_uses_local_proxy_and_hides_cdn_bearer(component_root):
+def test_yard_stream_returns_direct_main_without_local_proxy(component_root):
     manager = (component_root / "yard_camera_manager.py").read_text()
     init_source = (component_root / "__init__.py").read_text()
-    proxy = (component_root / "yard_hls_proxy.py").read_text()
-    assert "YardHlsProxy" in manager
-    assert "build_stream_url" in manager
-    assert "async_setup_yard_hls_proxy" in init_source
-    assert 'requires_auth = False' in proxy
-    assert '?auth=' in proxy
-    utils = (component_root / "yard_hls_utils.py").read_text()
-    assert 'inherit_hls_token' in utils
-    assert 'resolve_hls_reference' in utils
-    assert 'Authorization' in utils
-    assert "_rewrite_playlist" in proxy
-    assert "looks_like_playlist(prefix)" in proxy
-    assert "MEDIA URL" not in proxy
+    assert "YardHlsProxy" not in manager
+    assert "build_stream_url" not in manager
+    assert "return source" in manager
+    assert "[YARD_STREAM][DIRECT_SOURCE]" in manager
+    assert "async_setup_yard_hls_proxy" not in init_source
 
 
-def test_yard_stream_prefers_main_for_ffmpeg_compatibility(component_root):
+def test_low_latency_is_not_used_as_standard_stream_fallback(component_root):
     source = (component_root / "yard_stream.py").read_text()
-    main_pos = source.index('(\"main\", camera.hls_url)')
-    low_pos = source.index('(\"low_latency\", camera.low_latency_hls_url)')
-    assert main_pos < low_pos
+    assert '("low_latency", camera.low_latency_hls_url)' not in source
+    assert "LOW_LATENCY/realtime=1" in source

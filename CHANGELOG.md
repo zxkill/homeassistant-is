@@ -1,5 +1,15 @@
 # Changelog
 
+## 2.0.14
+
+- Полностью переосмыслена работа live-video после прямой диагностики CDN: `MEDIA.HLS.LIVE.MAIN` сам по себе является нормальным rolling HLS — media playlist содержит 3 MPEG-TS сегмента, не имеет `#EXT-X-ENDLIST`, а `MEDIA-SEQUENCE` и последний segment URI регулярно меняются. Поведение одинаково для Python/Chrome/Safari User-Agent.
+- Удалён из runtime-пути локальный HLS proxy 2.0.11–2.0.13 и искусственная адаптация односегментного playlist: они были основаны на неверной диагностической гипотезе и сами меняли поведение рабочего CDN-потока.
+- `stream_source()` снова отдаёт оригинальный `MEDIA.HLS.LIVE.MAIN` напрямую штатному Home Assistant Stream/PyAV/go2rtc.
+- `LOW_LATENCY` (`realtime=1`) больше не используется как fallback стандартного HA stream: именно этот URL присутствовал в ранних ошибках PyAV `Invalid data found when processing input`.
+- Probe `MAIN` больше не добавляет нестандартные `Authorization`, `Origin` и `Referer`; запрос остаётся максимально близким к успешно проверенному прямому CDN-запросу.
+- Добавлены безопасные логи `[YARD_STREAM][DIRECT_SOURCE]` и `[YARD_STREAM][LOW_LATENCY_ONLY]` без URL, bearer, UUID и адресов.
+- Старые `yard_hls_proxy.py`, `yard_hls_utils.py` и `yard_live_playlist.py` больше не импортируются и могут быть удалены из репозитория после применения patch.
+
 ## 2.0.13
 
 - Реальный HLS-тест показал vendor-specific поведение CDN Интерсвязи: media playlist для live-камеры содержит один MPEG-TS сегмент примерно на 10 секунд и `#EXT-X-ENDLIST`. Для Home Assistant/PyAV/go2rtc это корректный конечный VOD-клип, поэтому поток закономерно завершался через один сегмент.

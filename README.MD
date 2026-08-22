@@ -127,15 +127,15 @@ data:
 Начиная с **2.0.8** интеграция использует отдельный API видеонаблюдения `cams.is74.ru/api/yard-with-group` и создаёт `camera`-сущности для **всех камер, доступных аккаунту**, а не только для основного домофона.
 
 - snapshot берётся из `MEDIA.SNAPSHOT.LIVE.MAIN`;
-- начиная с 2.0.11 живой просмотр идёт через локальный HLS proxy интеграции: Home Assistant больше не получает CDN bearer URL напрямую;
-- proxy предпочитает `MEDIA.HLS.LIVE.MAIN` как наиболее совместимый с FFmpeg/go2rtc, а `LOW_LATENCY` использует как fallback;
-- вложенные HLS playlist/segment/key URI переписываются на локальные URL, при этом upstream bearer явно наследуется относительными ресурсами;
+- начиная с 2.0.14 живой просмотр использует оригинальный `MEDIA.HLS.LIVE.MAIN` напрямую через штатный `CameraEntityFeature.STREAM` Home Assistant;
+- `LOW_LATENCY` (`realtime=1`) намеренно не передаётся в PyAV/go2rtc: реальная диагностика показала, что именно этот вариант нестабилен в стандартном stream pipeline HA;
+- локальный HLS proxy и искусственная сборка rolling-playlist больше не участвуют в воспроизведении: CDN `MAIN` уже отдаёт обычный live HLS с несколькими MPEG-TS сегментами и растущим `MEDIA-SEQUENCE`;
 - камера основного подъезда сопоставляется с существующим устройством домофона, поэтому не создаётся второй дубль устройства;
 - камеры других подъездов создаются как отдельные camera-only устройства;
 - если cameras API временно недоступен, интеграция продолжает работать и использует старую relay-камеру как fallback;
 - временные CDN URL с bearer-токеном хранятся только в памяти и не сохраняются в ConfigEntry/diagnostics.
 
-Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream` и `custom_components.intersvyaz.yard_hls_proxy`. Начиная с 2.0.12 proxy также определяет вложенные playlist по содержимому `#EXTM3U`, сохраняет bearer после CDN redirect и дублирует его в upstream `Authorization`, не раскрывая credential в журнале. Начиная с 2.0.13 vendor-specific односегментный playlist с `#EXT-X-ENDLIST` автоматически превращается в rolling live playlist с монотонным media sequence, чтобы PyAV/go2rtc не завершали поток после первых ~10 секунд. Логи `[YARD_STREAM]` показывают выбор upstream playlist, а `[YARD_HLS_PROXY]` — работу локального proxy/вложенных ресурсов. Эти логи не содержат bearer-token, UUID, адрес или upstream media URL.
+Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream`. Логи `[YARD_STREAM][PROBE|SELECT|DIRECT_SOURCE|REFRESH_BEFORE_RETRY]` показывают проверку и выбор стандартного `MEDIA.HLS.LIVE.MAIN`, но не содержат bearer-token, UUID, адрес или media URL. В 2.0.14 поток намеренно не преобразуется: Home Assistant получает тот же `MAIN` HLS, который успешно обновляет `MEDIA-SEQUENCE` при прямом запросе к CDN.
 
 В настройке **«Камеры фонового анализа»** можно выбрать любую доступную камеру двора для локального распознавания. Автоматическое открытие возможно только для камеры, которая сопоставлена с доступным пользователю домофоном открытия.
 
