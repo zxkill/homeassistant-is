@@ -16,6 +16,7 @@ from .models import DoorRuntime, YardCameraRuntime
 from .runtime import IntersvyazConfigEntry
 from .yard_models import YardCameraInfo, YardGroupInfo
 from .yard_stream import YardStreamResolver
+from .yard_hls_compat import YardHlsCompatProxy
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_camera_manager")
 
@@ -37,7 +38,15 @@ class YardCameraManager:
         self._cameras: list[YardCameraRuntime] = []
         self._refresh_unsub = None
         self._reload_scheduled = False
-        self._stream_resolver = YardStreamResolver(async_get_clientsession(hass))
+        session = async_get_clientsession(hass)
+        self._stream_resolver = YardStreamResolver(session)
+        self._hls_compat_proxy = YardHlsCompatProxy(hass, entry, session)
+
+    @property
+    def hls_compat_proxy(self) -> YardHlsCompatProxy:
+        """Compatibility proxy that only normalises FFmpeg segment extensions."""
+
+        return self._hls_compat_proxy
 
     @property
     def cameras(self) -> list[YardCameraRuntime]:
@@ -93,6 +102,7 @@ class YardCameraManager:
         if self._refresh_unsub:
             self._refresh_unsub()
             self._refresh_unsub = None
+        self._hls_compat_proxy.invalidate()
 
     async def _async_scheduled_refresh(self, _now=None) -> None:
         await self.async_refresh()
@@ -129,6 +139,7 @@ class YardCameraManager:
             )
             self._cameras = fresh
             self._stream_resolver.invalidate()
+            self._hls_compat_proxy.invalidate()
             if not self._reload_scheduled:
                 self._reload_scheduled = True
                 self._hass.async_create_task(
@@ -143,6 +154,7 @@ class YardCameraManager:
         except (AttributeError, RuntimeError):
             pass
         self._stream_resolver.invalidate()
+        self._hls_compat_proxy.invalidate()
         _LOGGER.debug(
             "[YARD_CAMERAS][REFRESH_OK] entry_id=%s cameras=%s",
             self._entry.entry_id,
@@ -163,11 +175,11 @@ class YardCameraManager:
         source = await self._stream_resolver.async_resolve(camera)
         if source:
             _LOGGER.info(
-                "[YARD_STREAM][DIRECT_SOURCE] entry_id=%s camera=%s mode=main",
+                "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s mode=main",
                 self._entry.entry_id,
                 _safe_camera_ref(camera.uid),
             )
-            return source
+            return self._hls_compat_proxy.build_stream_url(camera, source)
 
         # Токен в MEDIA URL может устареть раньше планового шестичасового refresh.
         # Обновляем каталог один раз и повторяем probe уже с новыми URL.
@@ -184,11 +196,11 @@ class YardCameraManager:
         if not source:
             return None
         _LOGGER.info(
-            "[YARD_STREAM][DIRECT_SOURCE] entry_id=%s camera=%s mode=main refreshed=true",
+            "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s mode=main refreshed=true",
             self._entry.entry_id,
             _safe_camera_ref(camera.uid),
         )
-        return source
+        return self._hls_compat_proxy.build_stream_url(camera, source)
 
     def _build_cameras(self, groups: list[YardGroupInfo]) -> list[YardCameraRuntime]:
         result: list[YardCameraRuntime] = []

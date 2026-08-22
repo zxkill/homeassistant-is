@@ -127,15 +127,15 @@ data:
 Начиная с **2.0.8** интеграция использует отдельный API видеонаблюдения `cams.is74.ru/api/yard-with-group` и создаёт `camera`-сущности для **всех камер, доступных аккаунту**, а не только для основного домофона.
 
 - snapshot берётся из `MEDIA.SNAPSHOT.LIVE.MAIN`;
-- начиная с 2.0.14 живой просмотр использует оригинальный `MEDIA.HLS.LIVE.MAIN` напрямую через штатный `CameraEntityFeature.STREAM` Home Assistant;
-- `LOW_LATENCY` (`realtime=1`) намеренно не передаётся в PyAV/go2rtc: реальная диагностика показала, что именно этот вариант нестабилен в стандартном stream pipeline HA;
-- локальный HLS proxy и искусственная сборка rolling-playlist больше не участвуют в воспроизведении: CDN `MAIN` уже отдаёт обычный live HLS с несколькими MPEG-TS сегментами и растущим `MEDIA-SEQUENCE`;
+- начиная с 2.0.15 источником остаётся оригинальный `MEDIA.HLS.LIVE.MAIN`, но перед PyAV/go2rtc используется минимальный compatibility endpoint: он не меняет HLS timeline, а только нормализует нестандартные подписанные URL сегментов вида `.ts/<signature>` в локальные URL, заканчивающиеся на `.ts`;
+- `LOW_LATENCY` (`realtime=1`) намеренно не передаётся в PyAV/go2rtc;
+- сам MPEG-TS не перекодируется: H.264/AAC байты проксируются без изменений, а `MEDIA-SEQUENCE`, `EXTINF` и остальные live-теги остаются ровно такими, как их отдаёт CDN;
 - камера основного подъезда сопоставляется с существующим устройством домофона, поэтому не создаётся второй дубль устройства;
 - камеры других подъездов создаются как отдельные camera-only устройства;
 - если cameras API временно недоступен, интеграция продолжает работать и использует старую relay-камеру как fallback;
 - временные CDN URL с bearer-токеном хранятся только в памяти и не сохраняются в ConfigEntry/diagnostics.
 
-Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream`. Логи `[YARD_STREAM][PROBE|SELECT|DIRECT_SOURCE|REFRESH_BEFORE_RETRY]` показывают проверку и выбор стандартного `MEDIA.HLS.LIVE.MAIN`, но не содержат bearer-token, UUID, адрес или media URL. В 2.0.14 поток намеренно не преобразуется: Home Assistant получает тот же `MAIN` HLS, который успешно обновляет `MEDIA-SEQUENCE` при прямом запросе к CDN.
+Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream` и `custom_components.intersvyaz.yard_hls_compat`. Логи `[YARD_STREAM][PROBE|SELECT|COMPAT_SOURCE|REFRESH_BEFORE_RETRY]` и `[YARD_HLS_COMPAT][...]` показывают этапы выбора master, разрешения media playlist и выдачи сегментов, но не содержат bearer-token, UUID, адрес или upstream media URL. Compatibility endpoint нужен только из-за строгой проверки расширений HLS-сегментов в FFmpeg; содержимое потока не преобразуется.
 
 В настройке **«Камеры фонового анализа»** можно выбрать любую доступную камеру двора для локального распознавания. Автоматическое открытие возможно только для камеры, которая сопоставлена с доступным пользователю домофоном открытия.
 
