@@ -32,7 +32,9 @@
 - Home Assistant **2026.8.0+**;
 - доступ Home Assistant к `api.is74.ru` и `td-crm.is74.ru`;
 - аккаунт Интерсвязи с доступным домофоном;
-- для распознавания лиц — готовый headless OpenCV wheel (`opencv-python-headless`), без ручной сборки native-модулей.
+- для распознавания лиц — готовый headless OpenCV wheel (`opencv-contrib-python-headless`), без ручной сборки native-модулей.
+
+> В версии 2.0.6 используется именно `opencv-contrib-python-headless==4.14.0.94`: для него опубликованы готовые Linux ABI3 wheels для x86-64 и ARM64, совместимые с Python 3.14. Предыдущий пакет `opencv-python-headless==4.14.0.94` на некоторых Linux/Python 3.14 окружениях выбирался установщиком как исходный пакет и пытался собираться внутри Home Assistant.
 
 > Начиная с 2.0.5 распознавание использует **OpenCV Haar + компактный LBP descriptor** в отдельном worker-процессе. OpenCV не импортируется самим Home Assistant. Даже авария native worker (`SIGILL`/`SIGSEGV`/`SIGBUS`) не должна перезапускать Home Assistant: остальные функции интеграции продолжают работать.
 
@@ -121,7 +123,7 @@ data:
 
 ## Распознавание лиц
 
-Распознавание полностью локальное. Начиная с 2.0.5 используется `opencv-python-headless` со встроенным Haar-детектором и 128-мерным spatial LBP descriptor. Отдельные модели, `dlib`, `face_recognition` и ручной `pip install` больше не нужны.
+Распознавание полностью локальное. Начиная с 2.0.5 используется `opencv-contrib-python-headless` со встроенным Haar-детектором и 128-мерным spatial LBP descriptor. Отдельные модели, `dlib`, `face_recognition` и ручной `pip install` больше не нужны.
 
 Откройте:
 
@@ -245,7 +247,7 @@ logger:
 
 **Камера перестала показывать изображение** — дождитесь автоматического обновления ссылки либо перезагрузите интеграцию. Если проблема повторяется, приложите Diagnostics и журнал.
 
-**Распознавание недоступно** — проверьте установку `opencv-python-headless` и сообщения `custom_components.intersvyaz.recognition` в журнале. Не устанавливайте пакеты вручную внутрь временного Docker-контейнера: dependency объявлена в manifest и должна ставиться Home Assistant автоматически.
+**Распознавание недоступно** — проверьте установку `opencv-contrib-python-headless` и сообщения `custom_components.intersvyaz.recognition` в журнале. Не устанавливайте пакеты вручную внутрь временного Docker-контейнера: dependency объявлена в manifest и должна ставиться Home Assistant автоматически.
 
 **Дверь не открывается** — проверьте, что интеграция не находится в состоянии re-auth и что кнопка относится к нужному физическому домофону.
 

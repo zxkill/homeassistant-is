@@ -1,11 +1,18 @@
 # Changelog
 
+## 2.0.6
+
+- Исправлена установка OpenCV в Home Assistant 2026.8 / Python 3.14 на Linux: `opencv-python-headless==4.14.0.94` заменён на `opencv-contrib-python-headless==4.14.0.94`.
+- Для `opencv-contrib-python-headless` опубликованы готовые ABI3 manylinux wheels для x86-64 и ARM64, поэтому Home Assistant не должен пытаться собирать OpenCV из исходников.
+- Убран отдельный pin `numpy==2.3.2`: совместимую версию NumPy теперь разрешает штатная зависимость OpenCV, что снижает риск конфликтов с окружением Home Assistant.
+- Логика распознавания не менялась: используется тот же `cv2`, Haar-детектор и LBP descriptor; меняется только корректно устанавливаемый бинарный пакет.
+
 ## 2.0.5
 
 Замена несовместимого на части старых CPU dlib-движка распознавания.
 
 - Полностью удалены runtime-зависимости `dlib-bin` и `face-recognition-models`: они вызывали `SIGILL` на старом процессоре и делали добавление лиц невозможным.
-- Новый локальный движок использует `opencv-python-headless==4.14.0.94`, для которого опубликованы ABI3 wheels с поддержкой Python 3.14 и Linux x86-64/aarch64.
+- Новый локальный движок был переведён на `opencv-python-headless==4.14.0.94`; на части Linux/Python 3.14 окружений Home Assistant не находил подходящий wheel и пытался собирать пакет из исходников. Это исправлено в 2.0.6 переходом на `opencv-contrib-python-headless`.
 - Распознавание остаётся изолированным в отдельном worker-процессе: `cv2`/`numpy` не импортируются процессом Home Assistant.
 - Реализован встроенный pipeline Haar face detector + 128-мерный spatial LBP descriptor без скачивания внешних моделей.
 - Worker ограничен одним OpenCV thread и OpenCL отключён, чтобы не создавать лишнюю нагрузку на слабые Home Assistant хосты.
