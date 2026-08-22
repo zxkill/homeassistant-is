@@ -10,8 +10,7 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/zxkill/homeassistant-is/issues",
   "requirements": [
-    "opencv-python-headless==4.14.0.94",
-    "numpy==2.3.2"
+    "opencv-contrib-python-headless==4.14.0.94"
   ],
-  "version": "2.0.5"
+  "version": "2.0.6"
 }
