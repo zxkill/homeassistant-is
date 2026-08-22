@@ -10,3 +10,10 @@ def test_profile_does_not_expose_phone_attribute(component_root):
     source = (component_root / "sensor.py").read_text()
     profile = source[source.index("class IntersvyazProfileSensor"):source.index("class IntersvyazDoorStatusSensor")]
     assert '"phone"' not in profile
+
+
+def test_monetary_sensor_uses_iso_currency_string(component_root):
+    """HA 2026.8 expects ISO 4217 string; UnitOfCurrency is not exported."""
+    source = (component_root / "sensor.py").read_text()
+    assert "UnitOfCurrency" not in source
+    assert '_attr_native_unit_of_measurement = "RUB"' in source
