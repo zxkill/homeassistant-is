@@ -131,6 +131,7 @@ async def async_unload_entry(
     runtime = entry.runtime_data
     if runtime.background_processor is not None:
         runtime.background_processor.async_stop()
+    await runtime.face_manager.async_stop()
     runtime.door_manager.stop()
     runtime.snapshot_manager.invalidate()
     return True

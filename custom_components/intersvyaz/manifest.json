@@ -1,7 +1,9 @@
 {
   "domain": "intersvyaz",
   "name": "Intersvyaz Doorphone",
-  "codeowners": ["@zxkill"],
+  "codeowners": [
+    "@zxkill"
+  ],
   "config_flow": true,
   "documentation": "https://github.com/zxkill/homeassistant-is#readme",
   "integration_type": "hub",
@@ -13,5 +15,5 @@
     "numpy==2.3.2",
     "Pillow==12.3.0"
   ],
-  "version": "2.0.0"
+  "version": "2.0.1"
 }

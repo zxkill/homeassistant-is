@@ -332,6 +332,12 @@ class FaceRecognitionManager:
         self._streaks.pop(door_uid, None)
         return result
 
+    async def async_stop(self) -> None:
+        """Остановить изолированный recognition worker при выгрузке интеграции."""
+
+        _LOGGER.debug("Останавливаем face manager entry_id=%s", self._entry.entry_id)
+        await self._hass.async_add_executor_job(self._engine.close)
+
     def _advance_streak(self, door_uid: str, name: str) -> int:
         current = self._streaks.get(door_uid)
         if current is None or current.name != name:
