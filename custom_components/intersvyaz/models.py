@@ -60,3 +60,49 @@ class DoorRuntime:
             "has_image_url": bool(self.image_url),
             "has_open_link": bool(self.open_link),
         }
+
+
+@dataclass(slots=True)
+class YardCameraRuntime:
+    """Актуальные runtime-данные камеры из cams.is74.ru."""
+
+    uid: str
+    camera_id: int | None
+    uuid: str
+    group_id: str
+    group_name: str
+    name: str
+    address: str
+    porch: str | None
+    live_access: bool
+    archive_access: bool
+    movement_access: bool
+    snapshot_url: str | None
+    snapshot_lossy_url: str | None
+    hls_url: str | None
+    low_latency_hls_url: str | None
+    archive_hls_url: str | None
+    latitude: float | None
+    longitude: float | None
+    matched_door_uid: str | None = None
+
+    def update_from(self, other: "YardCameraRuntime") -> None:
+        """Обновить временные media URL и метаданные, сохранив identity."""
+
+        self.camera_id = other.camera_id
+        self.group_id = other.group_id
+        self.group_name = other.group_name
+        self.name = other.name
+        self.address = other.address
+        self.porch = other.porch
+        self.live_access = other.live_access
+        self.archive_access = other.archive_access
+        self.movement_access = other.movement_access
+        self.snapshot_url = other.snapshot_url
+        self.snapshot_lossy_url = other.snapshot_lossy_url
+        self.hls_url = other.hls_url
+        self.low_latency_hls_url = other.low_latency_hls_url
+        self.archive_hls_url = other.archive_hls_url
+        self.latitude = other.latitude
+        self.longitude = other.longitude
+        self.matched_door_uid = other.matched_door_uid

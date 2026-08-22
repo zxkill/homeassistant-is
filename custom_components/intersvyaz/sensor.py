@@ -15,8 +15,8 @@ from .const import (
     DOOR_EVENT_UNKNOWN_PERSON,
     SIGNAL_DOOR_EVENT,
 )
-from .devices import account_device_info, door_device_info
-from .models import DoorRuntime
+from .devices import account_device_info, door_device_info, yard_camera_device_info
+from .models import DoorRuntime, YardCameraRuntime
 from .runtime import IntersvyazConfigEntry
 
 
@@ -33,6 +33,9 @@ async def async_setup_entry(
     for door in entry.runtime_data.doors:
         entities.append(IntersvyazDoorStatusSensor(entry, door))
         entities.append(IntersvyazLastVisitorSensor(entry, door))
+    for camera in entry.runtime_data.live_yard_cameras:
+        if not camera.matched_door_uid:
+            entities.append(IntersvyazYardLastVisitorSensor(entry, camera))
     async_add_entities(entities)
 
 
@@ -205,3 +208,15 @@ class IntersvyazLastVisitorSensor(SensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         return dict(self._event_attributes)
+
+
+class IntersvyazYardLastVisitorSensor(IntersvyazLastVisitorSensor):
+    """Последний посетитель у camera-only камеры двора."""
+
+    def __init__(self, entry: IntersvyazConfigEntry, camera: YardCameraRuntime) -> None:
+        self._entry = entry
+        self._door_uid = camera.uid
+        self._attr_unique_id = f"{camera.uid}_last_visitor"
+        self._attr_device_info = yard_camera_device_info(entry.entry_id, camera)
+        self._attr_native_value = None
+        self._event_attributes = {}
