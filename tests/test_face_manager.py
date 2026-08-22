@@ -1,235 +1,140 @@
-"""Тесты менеджера распознавания лиц Intersvyaz."""
+"""Тесты нового локального менеджера распознавания Intersvyaz 2.0."""
 from __future__ import annotations
 
-import builtins
-import importlib
-import sys
-import types
-import warnings
 from types import SimpleNamespace
-from typing import List
 from unittest.mock import AsyncMock
 
 import pytest
 
-pytest.importorskip("voluptuous", reason="Зависимость интеграции требует voluptuous")
-
-from custom_components.intersvyaz import face_manager
 from custom_components.intersvyaz.const import (
     CONF_FACE_ENCODING,
     CONF_FACE_NAME,
     CONF_KNOWN_FACES,
-    DATA_FACE_MANAGER,
-    DOMAIN,
+    EVENT_FACE_RECOGNIZED,
+    EVENT_UNKNOWN_PERSON,
 )
 from custom_components.intersvyaz.face_manager import FaceRecognitionManager
+from custom_components.intersvyaz.recognition import FaceRecognitionResult
 from homeassistant.exceptions import HomeAssistantError
 
 
-class _FakeFaceRecognition:
-    """Минимальная подмена библиотеки face_recognition для тестов."""
+class _FakeEngine:
+    available = True
 
     def __init__(self) -> None:
-        self.loaded_images: List[bytes] = []
-        self.encodings_queue: List[List[List[float]]] = []
-        self.distances_queue: List[List[float]] = []
+        self.encoding = [0.1, 0.2, 0.3]
+        self.result = FaceRecognitionResult(faces_detected=0)
+        self.recognize_calls = 0
 
-    def load_image_file(self, stream) -> bytes:
-        data = stream.read()
-        self.loaded_images.append(data)
-        stream.seek(0)
-        return data
+    def extract_single_encoding(self, _image: bytes):
+        return list(self.encoding)
 
-    def face_encodings(self, _image) -> List[List[float]]:
-        if self.encodings_queue:
-            return self.encodings_queue.pop(0)
-        return []
-
-    def face_distance(self, _known, _encoding) -> List[float]:
-        if self.distances_queue:
-            return self.distances_queue.pop(0)
-        return [1.0]
+    def recognize(self, _image, _known, _threshold):
+        self.recognize_calls += 1
+        return self.result
 
 
-class _SyncConfigEntries:
-    """Синхронная заглушка config_entries.async_update_entry для проверки bool-результата."""
+class _ConfigEntries:
+    def async_update_entry(self, entry, *, data=None, options=None):
+        if data is not None:
+            entry.data = dict(data)
+        if options is not None:
+            entry.options = dict(options)
 
+
+class _Bus:
     def __init__(self) -> None:
-        self.calls = 0
+        self.events: list[tuple[str, dict]] = []
 
-    def async_update_entry(self, entry_obj, *, data=None, options=None):
-        """Имитировать синхронное сохранение опций без возвращения awaitable."""
-
-        self.calls += 1
-        if options is not None:
-            entry_obj.options = options
-        if data is not None:
-            entry_obj.data = data
-        return True
+    def async_fire(self, event_type: str, data: dict) -> None:
+        self.events.append((event_type, dict(data)))
 
 
-@pytest.mark.asyncio
-async def test_face_manager_add_match_and_remove(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Менеджер должен добавлять лица, распознавать их и удалять по запросу."""
-
-    fake_module = _FakeFaceRecognition()
-    monkeypatch.setattr(face_manager, "face_recognition", fake_module)
-
-    hass = SimpleNamespace(
-        data={DOMAIN: {"entry": {}}},
-        config_entries=_SyncConfigEntries(),
-    )
+def _make_hass():
+    hass = SimpleNamespace(data={}, config_entries=_ConfigEntries(), bus=_Bus())
 
     async def _async_add_executor_job(func, *args):
         return func(*args)
 
     hass.async_add_executor_job = _async_add_executor_job
-
-    entry = SimpleNamespace(entry_id="entry", options={})
-
-    manager = FaceRecognitionManager(hass, entry, match_threshold=0.5, cooldown_seconds=60)
-
-    fake_module.encodings_queue.append([[0.1, 0.2, 0.3]])
-
-    await manager.async_add_known_face("Гость", b"sample-bytes")
-    assert entry.options.get(CONF_KNOWN_FACES)
-    assert hass.data[DOMAIN][entry.entry_id][DATA_FACE_MANAGER] is manager
-
-    fake_module.encodings_queue.append([[0.1, 0.2, 0.3]])
-    fake_module.distances_queue.append([0.4])
-
-    open_callback = AsyncMock()
-    await manager.async_process_image("door-uid", b"frame-bytes", open_callback)
-    open_callback.assert_awaited_once()
-
-    await manager.async_process_image("door-uid", b"frame-bytes", open_callback)
-    assert open_callback.await_count == 1, "Повторный вызов должен быть заблокирован кулдауном"
-
-    await manager.async_remove_known_face("Гость")
-    assert not entry.options.get(CONF_KNOWN_FACES)
-    assert hass.config_entries.calls == 2
+    return hass
 
 
 @pytest.mark.asyncio
-async def test_face_manager_tolerates_bool_marked_awaitable(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Булев результат не должен аварийно ожидаться даже при неверном isawaitable."""
+async def test_add_recognize_event_and_open() -> None:
+    hass = _make_hass()
+    entry = SimpleNamespace(entry_id="entry", options={}, data={})
+    engine = _FakeEngine()
+    manager = FaceRecognitionManager(hass, entry, engine=engine, event_cooldown_seconds=0)
 
-    fake_module = _FakeFaceRecognition()
-    monkeypatch.setattr(face_manager, "face_recognition", fake_module)
+    await manager.async_add_known_face("Алексей", b"portrait")
+    stored = entry.options[CONF_KNOWN_FACES][0]
+    assert stored[CONF_FACE_NAME] == "Алексей"
+    assert stored[CONF_FACE_ENCODING] == engine.encoding
 
-    hass = SimpleNamespace(
-        data={DOMAIN: {"entry": {}}},
-        config_entries=_SyncConfigEntries(),
+    engine.result = FaceRecognitionResult(
+        faces_detected=1,
+        matched_name="Алексей",
+        distance=0.41,
     )
+    opener = AsyncMock()
+    await manager.async_process_image("door-1", b"frame-1", opener)
 
-    async def _async_add_executor_job(func, *args):
-        return func(*args)
-
-    hass.async_add_executor_job = _async_add_executor_job
-
-    # Сохраняем оригинальный isawaitable, чтобы после теста поведение осталось прежним.
-    original_isawaitable = face_manager.inspect.isawaitable
-
-    def _patched_isawaitable(value):
-        """Имитировать ошибочную маркировку булевых значений как awaitable."""
-
-        if isinstance(value, bool):
-            return True
-        return original_isawaitable(value)
-
-    monkeypatch.setattr(face_manager.inspect, "isawaitable", _patched_isawaitable)
-
-    entry = SimpleNamespace(entry_id="entry", options={})
-
-    manager = FaceRecognitionManager(hass, entry)
-
-    fake_module.encodings_queue.append([[0.5, 0.6, 0.7]])
-
-    # Если менеджер попытается ожидать bool, asyncio выбросит TypeError. Успешный вызов
-    # доказывает, что добавление лица корректно завершилось даже при некорректном
-    # определении awaitable.
-    await manager.async_add_known_face("Гость", b"sample-bytes")
-
-    assert entry.options.get(CONF_KNOWN_FACES)
-    assert hass.config_entries.calls == 1
+    opener.assert_awaited_once()
+    assert hass.bus.events[0][0] == EVENT_FACE_RECOGNIZED
+    assert hass.bus.events[0][1]["person"] == "Алексей"
+    assert hass.bus.events[0][1]["distance"] == 0.41
 
 
 @pytest.mark.asyncio
-async def test_face_manager_stores_faces_with_awaitable_update(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Если update_entry возвращает awaitable, менеджер обязан его дождаться."""
-
-    fake_module = _FakeFaceRecognition()
-    monkeypatch.setattr(face_manager, "face_recognition", fake_module)
-
-    async def _async_update_entry(entry_obj, *, data=None, options=None):
-        if options is not None:
-            entry_obj.options = options
-
-    update_mock = AsyncMock(side_effect=_async_update_entry)
-
-    hass = SimpleNamespace(
-        data={DOMAIN: {"entry": {}}},
-        config_entries=SimpleNamespace(async_update_entry=update_mock),
+async def test_unknown_person_fires_event_without_open() -> None:
+    hass = _make_hass()
+    entry = SimpleNamespace(
+        entry_id="entry",
+        options={
+            CONF_KNOWN_FACES: [
+                {CONF_FACE_NAME: "Алексей", CONF_FACE_ENCODING: [0.1, 0.2, 0.3]}
+            ]
+        },
+        data={},
     )
+    engine = _FakeEngine()
+    engine.result = FaceRecognitionResult(faces_detected=1, distance=0.81)
+    manager = FaceRecognitionManager(hass, entry, engine=engine, event_cooldown_seconds=0)
+    opener = AsyncMock()
 
-    async def _async_add_executor_job(func, *args):
-        return func(*args)
+    await manager.async_process_image("door-1", b"unknown", opener)
 
-    hass.async_add_executor_job = _async_add_executor_job
-
-    entry = SimpleNamespace(entry_id="entry", options={})
-
-    manager = FaceRecognitionManager(hass, entry)
-    fake_module.encodings_queue.append([[0.1, 0.2, 0.3]])
-
-    await manager.async_add_known_face("Гость", b"sample-bytes")
-
-    update_mock.assert_awaited_once()
+    opener.assert_not_awaited()
+    assert hass.bus.events[0][0] == EVENT_UNKNOWN_PERSON
+    assert hass.bus.events[0][1]["faces_detected"] == 1
 
 
 @pytest.mark.asyncio
-async def test_face_manager_requires_library(monkeypatch: pytest.MonkeyPatch) -> None:
-    """При отсутствии библиотеки распознавания менеджер сообщает об ошибке."""
-
-    monkeypatch.setattr(face_manager, "face_recognition", None)
-
-    async def _async_update_entry(entry_obj, *, data=None, options=None):
-        if options is not None:
-            entry_obj.options = options
-        if data is not None:
-            entry_obj.data = data
-
-    hass = SimpleNamespace(
-        data={DOMAIN: {"entry": {}}},
-        config_entries=SimpleNamespace(
-            async_update_entry=AsyncMock(side_effect=_async_update_entry)
-        ),
+async def test_identical_frame_is_not_processed_twice() -> None:
+    hass = _make_hass()
+    entry = SimpleNamespace(
+        entry_id="entry",
+        options={
+            CONF_KNOWN_FACES: [
+                {CONF_FACE_NAME: "Алексей", CONF_FACE_ENCODING: [0.1, 0.2, 0.3]}
+            ]
+        },
+        data={},
     )
+    engine = _FakeEngine()
+    engine.result = FaceRecognitionResult(faces_detected=0)
+    manager = FaceRecognitionManager(hass, entry, engine=engine)
 
-    async def _async_add_executor_job(func, *args):
-        return func(*args)
+    await manager.async_process_image("door-1", b"same-frame", None)
+    await manager.async_process_image("door-1", b"same-frame", None)
 
-    hass.async_add_executor_job = _async_add_executor_job
-
-    entry = SimpleNamespace(entry_id="entry", options={})
-
-    manager = FaceRecognitionManager(hass, entry)
-    assert not manager.library_available
-
-    with pytest.raises(HomeAssistantError):
-        await manager.async_add_known_face("Кто-то", b"data")
+    assert engine.recognize_calls == 1
 
 
-def test_face_manager_lists_known_faces(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Менеджер предоставляет копии списков лиц для UI и тестов."""
-
-    monkeypatch.setattr(face_manager, "face_recognition", object())
-
-    hass = SimpleNamespace(data={DOMAIN: {}})
+@pytest.mark.asyncio
+async def test_remove_face() -> None:
+    hass = _make_hass()
     entry = SimpleNamespace(
         entry_id="entry",
         options={
@@ -237,58 +142,12 @@ def test_face_manager_lists_known_faces(monkeypatch: pytest.MonkeyPatch) -> None
                 {CONF_FACE_NAME: "Гость", CONF_FACE_ENCODING: [0.1, 0.2, 0.3]}
             ]
         },
+        data={},
     )
+    manager = FaceRecognitionManager(hass, entry, engine=_FakeEngine())
 
-    manager = FaceRecognitionManager(hass, entry)
+    await manager.async_remove_known_face("Гость")
+    assert entry.options[CONF_KNOWN_FACES] == []
 
-    names = manager.list_known_face_names()
-    faces = manager.list_known_faces()
-
-    assert names == ["Гость"]
-    assert faces[0].name == "Гость"
-
-    names.append("Друг")
-    faces.append(face_manager.KnownFace(name="Друг", encoding=[0.4]))
-
-    assert manager.list_known_face_names() == ["Гость"]
-    assert len(manager.list_known_faces()) == 1
-
-
-def test_face_manager_suppresses_pkg_resources_warning(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """При импорте модуля предупреждение о pkg_resources должно подавляться."""
-
-    original_import = builtins.__import__
-
-    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        """Подмена импорта face_recognition, генерирующая предупреждение."""
-
-        if name == "face_recognition" and level == 0:
-            warnings.warn(
-                "pkg_resources is deprecated as an API.",
-                UserWarning,
-            )
-            module = types.ModuleType("face_recognition")
-            module.face_encodings = lambda *_args, **_kwargs: []
-            module.face_distance = lambda *_args, **_kwargs: []
-            module.load_image_file = lambda stream: stream.read()
-            sys.modules[name] = module
-            return module
-        return original_import(name, globals, locals, fromlist, level)
-
-    # Убедимся, что предыдущие импорты не мешают воспроизведению предупреждения.
-    monkeypatch.setitem(sys.modules, "face_recognition", None, raising=False)
-    monkeypatch.setattr(builtins, "__import__", _fake_import)
-
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("error")
-        reloaded = importlib.reload(face_manager)
-
-    # Предупреждение должно быть погашено локальным фильтром внутри face_manager.
-    assert not caught
-    assert reloaded._SUPPRESSED_PKG_RESOURCES_WARNING is True
-
-    # Возвращаем исходное состояние, чтобы остальные тесты работали с чистым модулем.
-    monkeypatch.undo()
-    importlib.reload(face_manager)
+    with pytest.raises(HomeAssistantError):
+        await manager.async_remove_known_face("Гость")

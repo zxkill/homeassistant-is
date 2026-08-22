@@ -1,15 +1,12 @@
 """Камеры домофонов интеграции Intersvyaz."""
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import Any, Dict
 
-from aiohttp import ClientError
 from homeassistant.components.camera import Camera
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -20,6 +17,7 @@ from .const import (
     DATA_OPEN_DOOR,
     DOMAIN,
 )
+from .snapshot import get_snapshot_manager
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.camera")
 
@@ -55,9 +53,7 @@ async def async_setup_entry(
         cameras.append(IntersvyazDoorCamera(hass, entry, door_entry))
 
     if not cameras:
-        _LOGGER.info(
-            "Для entry_id=%s не найдено домофонов со снимками", entry.entry_id
-        )
+        _LOGGER.info("Для entry_id=%s не найдено домофонов со снимками", entry.entry_id)
         return
 
     _LOGGER.info(
@@ -69,7 +65,7 @@ async def async_setup_entry(
 
 
 class IntersvyazDoorCamera(Camera):
-    """Камера, отображающая актуальные снимки домофона каждые 5 секунд."""
+    """Камера, отображающая актуальный снимок домофона."""
 
     def __init__(
         self,
@@ -87,20 +83,15 @@ class IntersvyazDoorCamera(Camera):
         self._attr_name = f"Камера домофона ({address})"
         self._attr_unique_id = f"{self._door_uid}_camera"
         self._attr_frame_interval = CAMERA_FRAME_INTERVAL_SECONDS
-        # Интервал обновления изображения в интерфейсе Home Assistant.
-        # Без явного задания `image_refresh_seconds` Lovelace обновляет
-        # статичные снимки каждые 10 секунд. Указываем константу, чтобы
-        # гарантировать опрос каждые пять секунд, как и заявлено в README.
         self._attr_image_refresh_seconds = CAMERA_FRAME_INTERVAL_SECONDS
         self._attr_should_poll = False
-        # Привязываем камеру к устройству домофона, чтобы она отображалась в интеграции.
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name="Домофон Интерсвязь",
         )
 
     def _current_entry(self) -> Dict[str, Any]:
-        """Получить актуальный словарь домофона из хранилища Home Assistant."""
+        """Получить актуальные данные домофона из runtime-хранилища."""
 
         domain_store = self._hass.data.get(DOMAIN, {})
         entry_store = domain_store.get(self._entry.entry_id, {})
@@ -110,70 +101,49 @@ class IntersvyazDoorCamera(Camera):
         return self._door_entry
 
     async def async_added_to_hass(self) -> None:
-        """Залогировать регистрацию камеры для облегчения диагностики."""
+        """Залогировать регистрацию камеры для диагностики."""
 
         entity_id = self.entity_id or "<entity_id не назначен>"
         _LOGGER.info(
-            "Камера домофона uid=%s зарегистрирована с entity_id=%s и интервалом %s с",
+            "Камера домофона uid=%s зарегистрирована: entity_id=%s refresh=%ss",
             self._door_uid,
             entity_id,
             CAMERA_FRAME_INTERVAL_SECONDS,
         )
 
-    async def async_camera_image(self, width: int | None = None, height: int | None = None) -> bytes | None:
-        """Запросить снимок домофона, гарантируя подробное логирование."""
+    async def async_camera_image(
+        self, width: int | None = None, height: int | None = None
+    ) -> bytes | None:
+        """Получить снимок через общий менеджер, исключая лишние HTTP-запросы."""
 
         door_entry = self._current_entry()
         image_url = door_entry.get("image_url")
         if not image_url:
-            _LOGGER.warning(
-                "Для домофона uid=%s отсутствует ссылка на снимок, камера покажет последний кадр",
-                self._door_uid,
-            )
+            _LOGGER.warning("Для домофона uid=%s отсутствует ссылка на снимок", self._door_uid)
             return None
 
-        session = async_get_clientsession(self._hass)
-        try:
-            async with session.get(image_url) as response:
-                if response.status != 200:
-                    _LOGGER.error(
-                        "Не удалось получить снимок домофона uid=%s: статус=%s",
-                        self._door_uid,
-                        response.status,
-                    )
-                    return None
-                data = await response.read()
-        except (ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.error(
-                "Ошибка загрузки снимка домофона uid=%s: %s",
-                self._door_uid,
-                err,
-            )
+        manager = get_snapshot_manager(self._hass, self._entry)
+        data = await manager.async_get_snapshot(self._door_uid, image_url)
+        if not data:
             return None
-
-        _LOGGER.debug(
-            "Получен снимок домофона uid=%s (%s байт)",
-            self._door_uid,
-            len(data),
-        )
 
         await self._async_try_face_recognition(data)
         return data
 
     async def _async_try_face_recognition(self, image: bytes) -> None:
-        """Запустить распознавание лиц для текущего домофона, если оно включено."""
+        """Запустить локальное распознавание лиц для полученного кадра."""
 
         domain_store = self._hass.data.get(DOMAIN, {})
         entry_store = domain_store.get(self._entry.entry_id)
         if not entry_store:
             _LOGGER.debug(
-                "Не удалось выполнить распознавание лиц для uid=%s: нет данных entry", self._door_uid
+                "Распознавание uid=%s пропущено: runtime entry отсутствует", self._door_uid
             )
             return
         manager = entry_store.get(DATA_FACE_MANAGER)
         if not manager:
             _LOGGER.debug(
-                "Распознавание лиц не настроено для entry_id=%s", self._entry.entry_id
+                "Распознавание uid=%s пропущено: face manager не настроен", self._door_uid
             )
             return
         door_entry = self._current_entry()

@@ -10,8 +10,9 @@ DATA_DOOR_OPENERS = "door_openers"
 DATA_DOOR_REFRESH_UNSUB = "door_refresh_unsub"
 DATA_FACE_MANAGER = "face_manager"
 DATA_BACKGROUND_PROCESSOR = "background_processor"
+DATA_SNAPSHOT_MANAGER = "snapshot_manager"
 
-# Базовые URL для API Intersvyaz (можно заменить при реальной интеграции)
+# Базовые URL для API Intersvyaz
 DEFAULT_API_BASE_URL = "https://api.is74.ru"
 DEFAULT_CRM_BASE_URL = "https://td-crm.is74.ru"
 
@@ -26,7 +27,6 @@ RELAYS_ENDPOINT = "/domofon/relays"
 
 # Конечные точки CRM
 CRM_AUTH_ENDPOINT = "/api/auth-lk"
-# Шаблон конечной точки открытия домофона.
 CRM_OPEN_DOOR_ENDPOINT_TEMPLATE = "/api/open/{mac}/{door_id}"
 
 # Значения по умолчанию для технических параметров авторизации
@@ -41,8 +41,14 @@ TOKEN_EXPIRATION_MARGIN = 60
 DEFAULT_UPDATE_INTERVAL_MINUTES = 10
 DOOR_LINK_REFRESH_INTERVAL_HOURS = 6
 CAMERA_FRAME_INTERVAL_SECONDS = 2
+SNAPSHOT_CACHE_TTL_SECONDS = 1.0
 FACE_RECOGNITION_DISTANCE_THRESHOLD = 0.6
 FACE_RECOGNITION_COOLDOWN_SECONDS = 30
+FACE_EVENT_COOLDOWN_SECONDS = 10
+
+# События Home Assistant
+EVENT_FACE_RECOGNIZED = "intersvyaz_face_recognized"
+EVENT_UNKNOWN_PERSON = "intersvyaz_unknown_person"
 
 # Названия сервисов
 SERVICE_OPEN_DOOR = "open_door"
@@ -82,4 +88,3 @@ HEADER_AUTHORIZATION = "Authorization"
 
 # Прочие константы
 LOGGER_NAME = "custom_components.intersvyaz"
-

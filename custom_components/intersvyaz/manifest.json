@@ -1,12 +1,15 @@
 {
   "domain": "intersvyaz",
   "name": "Intersvyaz Doorphone",
-  "version": "1.0.0",
+  "version": "2.0.0-beta.1",
   "documentation": "https://github.com/zxkill/homeassistant-is#readme",
   "issue_tracker": "https://github.com/zxkill/homeassistant-is/issues",
-  "requirements": [],
+  "requirements": [
+    "dlib-bin==20.0.1",
+    "face-recognition-models==0.3.0"
+  ],
   "codeowners": ["@zxkill"],
   "config_flow": true,
-  "integration_type": "service",
+  "integration_type": "hub",
   "iot_class": "cloud_polling"
 }

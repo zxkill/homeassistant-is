@@ -6,10 +6,8 @@ import logging
 from datetime import timedelta
 from typing import Any, Callable, Iterable, Optional
 
-from aiohttp import ClientError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
@@ -20,6 +18,7 @@ from .const import (
     DATA_OPEN_DOOR,
     DOMAIN,
 )
+from .snapshot import get_snapshot_manager
 
 _LOGGER = logging.getLogger(f"{DOMAIN}.background")
 
@@ -33,24 +32,19 @@ def _is_video_capable(door: dict[str, Any]) -> bool:
 def calculate_default_background_uids(
     entry: ConfigEntry, doors: Iterable[dict[str, Any]]
 ) -> list[str]:
-    """Определить список домофонов для фоновой обработки по умолчанию."""
+    """Определить домофон для фоновой обработки по умолчанию."""
 
     candidates = [door for door in doors if _is_video_capable(door)]
     if not candidates:
         return []
-
-    # В первую очередь выбираем основной подъезд, чтобы владельцу не приходилось
-    # вручную включать самый востребованный домофон.
     main_candidates = [door for door in candidates if door.get("is_main")]
     if main_candidates:
         return [str(main_candidates[0].get("uid"))]
-
-    # Если основного подъезда нет, используем первый доступный домофон с камерой.
     return [str(candidates[0].get("uid"))]
 
 
 class DoorBackgroundProcessor:
-    """Менеджер, который по таймеру забирает снимки и запускает распознавание."""
+    """По таймеру получает снимки выбранных домофонов и анализирует их."""
 
     def __init__(
         self,
@@ -58,39 +52,32 @@ class DoorBackgroundProcessor:
         entry: ConfigEntry,
         *,
         interval_seconds: float = CAMERA_FRAME_INTERVAL_SECONDS,
-        scheduler: Callable[[HomeAssistant, Callable[[Optional[Any]], Any], timedelta], Callable[[], None]] = async_track_time_interval,
+        scheduler: Callable[
+            [HomeAssistant, Callable[[Optional[Any]], Any], timedelta], Callable[[], None]
+        ] = async_track_time_interval,
     ) -> None:
-        # Экземпляр Home Assistant и запись конфигурации понадобятся для доступа
-        # к общему хранилищу данных и опциям пользователя.
         self._hass = hass
         self._entry = entry
-        # Интервал опроса камеры. Используем seconds, чтобы не зависеть от HA.
         self._interval = max(float(interval_seconds), 1.0)
-        # Фабрика планировщика позволяет подменять расписание в тестах.
         self._scheduler = scheduler
-        # Храним функцию отмены таймера, чтобы корректно останавливать обработку.
         self._unsubscribe: Callable[[], None] | None = None
-        # Используем набор для быстрого контроля выбранных домофонов.
         self._selected_uids: set[str] = set()
-        # Блокировка защищает выполнение цикла от конкурентных запусков.
         self._lock = asyncio.Lock()
-        # Флаг показывает, что во время выполнения цикла прилетел ещё один запуск,
-        # и его нужно повторить сразу после завершения текущего.
         self._has_pending_run = False
 
     @property
     def selected_uids(self) -> set[str]:
-        """Вернуть копию текущего списка домофонов для фоновой обработки."""
+        """Вернуть копию списка домофонов для фоновой обработки."""
 
         return set(self._selected_uids)
 
     async def async_setup(self) -> None:
-        """Инициализировать фоновую обработку на основании текущих опций."""
+        """Инициализировать фоновую обработку из options."""
 
         await self.async_refresh_from_options(initial=True)
 
     def async_stop(self) -> None:
-        """Остановить таймер фоновой обработки и очистить состояние."""
+        """Остановить таймер фоновой обработки."""
 
         if self._unsubscribe:
             self._unsubscribe()
@@ -104,7 +91,7 @@ class DoorBackgroundProcessor:
         available = self._list_available_doors()
         if not available:
             _LOGGER.debug(
-                "Для entry_id=%s нет домофонов с видео. Фоновая обработка отключена.",
+                "Для entry_id=%s нет домофонов с видео; фоновая обработка отключена",
                 self._entry.entry_id,
             )
             self.async_stop()
@@ -117,8 +104,7 @@ class DoorBackgroundProcessor:
             desired = set(calculate_default_background_uids(self._entry, available.values()))
             if desired and not initial:
                 _LOGGER.info(
-                    "Для entry_id=%s применяем резервный список домофонов для фоновой"
-                    " обработки: %s",
+                    "Для entry_id=%s применён резервный список фоновых камер: %s",
                     self._entry.entry_id,
                     ", ".join(sorted(desired)),
                 )
@@ -126,44 +112,36 @@ class DoorBackgroundProcessor:
         await self._async_apply_selection(desired, available)
 
     async def async_force_cycle(self) -> None:
-        """Принудительно выполнить один цикл фоновой обработки (для тестов)."""
+        """Принудительно выполнить один цикл фоновой обработки."""
 
         await self._async_process_selected()
 
     async def _async_apply_selection(
         self, desired: set[str], available: dict[str, dict[str, Any]]
     ) -> None:
-        """Запланировать обработку для выбранных домофонов и обновить таймер."""
-
         if desired == self._selected_uids:
             _LOGGER.debug(
-                "Список фоновых домофонов для entry_id=%s не изменился: %s",
+                "Список фоновых камер entry_id=%s не изменился: %s",
                 self._entry.entry_id,
                 ", ".join(sorted(desired)) or "<пусто>",
             )
             return
 
         self._selected_uids = {uid for uid in desired if uid in available}
-
         if self._unsubscribe:
             self._unsubscribe()
             self._unsubscribe = None
 
         if not self._selected_uids:
-            _LOGGER.info(
-                "Фоновая обработка домофонов отключена для entry_id=%s", self._entry.entry_id
-            )
+            _LOGGER.info("Фоновая обработка отключена для entry_id=%s", self._entry.entry_id)
             return
 
         _LOGGER.info(
-            "Для entry_id=%s фоново обрабатываются домофоны: %s",
+            "Фоновая обработка entry_id=%s: cameras=%s interval=%ss",
             self._entry.entry_id,
             ", ".join(sorted(self._selected_uids)),
+            self._interval,
         )
-        # Используем асинхронный обработчик, чтобы `async_track_time_interval`
-        # выполнял вызов непосредственно в event loop Home Assistant без
-        # дополнительного порождения задач из потоков исполнителя. Это
-        # предотвращает предупреждения о небезопасном доступе к `hass`.
         self._unsubscribe = self._scheduler(
             self._hass,
             self._async_schedule_handler,
@@ -171,51 +149,30 @@ class DoorBackgroundProcessor:
         )
 
     def _list_available_doors(self) -> dict[str, dict[str, Any]]:
-        """Сформировать словарь домофонов, доступных для фоновой обработки."""
-
         domain_store = self._hass.data.get(DOMAIN, {})
         entry_store = domain_store.get(self._entry.entry_id, {})
         door_openers = entry_store.get(DATA_DOOR_OPENERS, []) or []
         result: dict[str, dict[str, Any]] = {}
         for door in door_openers:
             uid = door.get("uid")
-            if not isinstance(uid, str):
-                continue
-            if not _is_video_capable(door):
-                continue
-            result[uid] = door
+            if isinstance(uid, str) and _is_video_capable(door):
+                result[uid] = door
         return result
 
     async def _async_schedule_handler(self, now: Optional[Any]) -> None:
-        """Обработать срабатывание таймера фоновой обработки.
-
-        Метод вызывается напрямую из планировщика Home Assistant и всегда
-        работает внутри его event loop, поэтому можно безопасно ожидать
-        выполнение фонового цикла без дополнительных `async_create_task`.
-        В логах фиксируем время события, чтобы отслеживать стабильность
-        расписания.
-        """
-
         _LOGGER.debug(
-            "Таймер фонового цикла для entry_id=%s сработал в момент: %s",
+            "Сработал таймер фоновой обработки entry_id=%s time=%s",
             self._entry.entry_id,
             now,
         )
         await self._async_process_selected()
 
     async def _async_process_selected(self) -> None:
-        """Загрузить снимки для всех выбранных домофонов и запустить распознавание."""
-
         if not self._selected_uids:
-            _LOGGER.debug(
-                "Фоновый цикл entry_id=%s не запланирован: список домофонов пуст",
-                self._entry.entry_id,
-            )
             return
         if self._lock.locked():
             _LOGGER.debug(
-                "Запрос фонового цикла для entry_id=%s получен во время выполнения —"
-                " отметим необходимость повторного запуска",
+                "Фоновый цикл entry_id=%s уже выполняется; запрос отмечен как pending",
                 self._entry.entry_id,
             )
             self._has_pending_run = True
@@ -224,18 +181,11 @@ class DoorBackgroundProcessor:
         run_again = False
         async with self._lock:
             try:
-                _LOGGER.debug(
-                    "Начинаем фоновый цикл загрузки снимков для entry_id=%s (домофоны: %s)",
-                    self._entry.entry_id,
-                    ", ".join(sorted(self._selected_uids)),
-                )
-                domain_store = self._hass.data.get(DOMAIN, {})
-                entry_store = domain_store.get(self._entry.entry_id, {})
+                entry_store = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
                 manager = entry_store.get(DATA_FACE_MANAGER)
                 if manager is None:
                     _LOGGER.debug(
-                        "Менеджер распознавания лиц недоступен, фоновая обработка entry_id=%s"
-                        " пропущена",
+                        "Фоновый цикл entry_id=%s пропущен: face manager недоступен",
                         self._entry.entry_id,
                     )
                     return
@@ -243,86 +193,49 @@ class DoorBackgroundProcessor:
                 default_open = entry_store.get(DATA_OPEN_DOOR)
                 doors = self._list_available_doors()
                 if not doors:
-                    _LOGGER.debug(
-                        "Для entry_id=%s не осталось домофонов с видео, таймер будет очищен",
-                        self._entry.entry_id,
-                    )
                     self.async_stop()
                     return
 
-                session = async_get_clientsession(self._hass)
                 for uid in list(self._selected_uids):
                     door = doors.get(uid)
                     if not door:
-                        _LOGGER.info(
-                            "Домофон uid=%s больше недоступен для entry_id=%s, удаляем из фонового"
-                            " списка",
-                            uid,
-                            self._entry.entry_id,
-                        )
                         self._selected_uids.discard(uid)
                         continue
-                    await self._async_process_single(session, manager, door, default_open)
+                    await self._async_process_single(manager, door, default_open)
 
-                if not self._selected_uids:
-                    _LOGGER.info(
-                        "Все домофоны были исключены из фоновой обработки entry_id=%s",
-                        self._entry.entry_id,
-                    )
-                    if self._unsubscribe:
-                        self._unsubscribe()
-                        self._unsubscribe = None
+                if not self._selected_uids and self._unsubscribe:
+                    self._unsubscribe()
+                    self._unsubscribe = None
             finally:
                 run_again = self._has_pending_run
                 self._has_pending_run = False
 
         if run_again:
-            _LOGGER.debug(
-                "Для entry_id=%s запланирован немедленный повтор фонового цикла после"
-                " завершения предыдущего",
-                self._entry.entry_id,
-            )
             self._hass.async_create_task(self._async_process_selected())
 
     async def _async_process_single(
         self,
-        session,
         manager,
         door: dict[str, Any],
         default_open: Callable[[], Any] | None,
     ) -> None:
-        """Получить снимок конкретного домофона и передать его менеджеру лиц."""
-
         uid = str(door.get("uid"))
         image_url = door.get("image_url")
         if not image_url:
-            _LOGGER.debug(
-                "У домофона uid=%s отсутствует ссылка на снимок, фоновая обработка пропущена",
-                uid,
-            )
             return
 
-        try:
-            async with session.get(image_url) as response:
-                if response.status != 200:
-                    _LOGGER.warning(
-                        "Не удалось получить снимок домофона uid=%s: HTTP %s", uid, response.status
-                    )
-                    return
-                image_bytes = await response.read()
-        except (ClientError, asyncio.TimeoutError) as err:
-            _LOGGER.warning(
-                "Ошибка фоновой загрузки снимка домофона uid=%s: %s", uid, err
-            )
+        snapshot_manager = get_snapshot_manager(self._hass, self._entry)
+        image_bytes = await snapshot_manager.async_get_snapshot(uid, image_url)
+        if not image_bytes:
             return
 
         open_callback = door.get("callback") or default_open
         try:
             await manager.async_process_image(uid, image_bytes, open_callback)
-        except Exception as err:  # pragma: no cover - защитная ветка для неожиданных ошибок
+        except Exception as err:  # pragma: no cover - защитная ветка
             _LOGGER.exception(
-                "Не удалось обработать снимок домофона uid=%s во время фонового цикла: %s",
+                "Ошибка фонового анализа uid=%s entry_id=%s: %s",
                 uid,
+                self._entry.entry_id,
                 err,
             )
-
