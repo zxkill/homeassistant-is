@@ -16,9 +16,7 @@ from typing import Iterable, Sequence
 
 from homeassistant.exceptions import HomeAssistantError
 
-from ..const import DOMAIN
-
-_LOGGER = logging.getLogger(f"{DOMAIN}.recognition")
+_LOGGER = logging.getLogger("custom_components.intersvyaz.recognition")
 
 try:
     import dlib  # type: ignore
@@ -60,7 +58,10 @@ class DlibFaceRecognitionEngine:
     def available(self) -> bool:
         """Готовы ли Python-зависимости движка."""
 
-        return _IMPORT_ERROR is None and importlib.util.find_spec("face_recognition_models") is not None
+        return (
+            _IMPORT_ERROR is None
+            and importlib.util.find_spec("face_recognition_models") is not None
+        )
 
     def extract_single_encoding(self, image_bytes: bytes) -> list[float]:
         """Получить вектор ровно одного лица из фотографии."""

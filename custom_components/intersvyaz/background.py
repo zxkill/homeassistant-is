@@ -1,60 +1,35 @@
-"""Фоновая обработка снимков домофона для распознавания лиц."""
+"""Фоновая обработка снимков выбранных домофонов."""
 from __future__ import annotations
 
 import asyncio
 import logging
 from datetime import timedelta
-from typing import Any, Callable, Iterable, Optional
+from typing import Any, Callable
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
 
 from .const import (
     CAMERA_FRAME_INTERVAL_SECONDS,
     CONF_BACKGROUND_CAMERAS,
-    DATA_DOOR_OPENERS,
-    DATA_FACE_MANAGER,
-    DATA_OPEN_DOOR,
-    DOMAIN,
+    RECOGNITION_MODE_OFF,
 )
-from .snapshot import get_snapshot_manager
+from .runtime import IntersvyazConfigEntry
+from .security import safe_door_ref
 
-_LOGGER = logging.getLogger(f"{DOMAIN}.background")
-
-
-def _is_video_capable(door: dict[str, Any]) -> bool:
-    """Проверить, доступна ли у домофона камера со снимком."""
-
-    return bool(door.get("has_video")) and bool(door.get("image_url"))
-
-
-def calculate_default_background_uids(
-    entry: ConfigEntry, doors: Iterable[dict[str, Any]]
-) -> list[str]:
-    """Определить домофон для фоновой обработки по умолчанию."""
-
-    candidates = [door for door in doors if _is_video_capable(door)]
-    if not candidates:
-        return []
-    main_candidates = [door for door in candidates if door.get("is_main")]
-    if main_candidates:
-        return [str(main_candidates[0].get("uid"))]
-    return [str(candidates[0].get("uid"))]
+_LOGGER = logging.getLogger("custom_components.intersvyaz.background")
 
 
 class DoorBackgroundProcessor:
-    """По таймеру получает снимки выбранных домофонов и анализирует их."""
+    """Периодически получает кадры и передаёт их локальному recognition engine."""
 
     def __init__(
         self,
         hass: HomeAssistant,
-        entry: ConfigEntry,
+        entry: IntersvyazConfigEntry,
         *,
         interval_seconds: float = CAMERA_FRAME_INTERVAL_SECONDS,
-        scheduler: Callable[
-            [HomeAssistant, Callable[[Optional[Any]], Any], timedelta], Callable[[], None]
-        ] = async_track_time_interval,
+        scheduler: Callable = async_track_time_interval,
     ) -> None:
         self._hass = hass
         self._entry = entry
@@ -63,179 +38,122 @@ class DoorBackgroundProcessor:
         self._unsubscribe: Callable[[], None] | None = None
         self._selected_uids: set[str] = set()
         self._lock = asyncio.Lock()
-        self._has_pending_run = False
+        self._pending = False
+        self._snapshot_failures: dict[str, int] = {}
 
     @property
     def selected_uids(self) -> set[str]:
-        """Вернуть копию списка домофонов для фоновой обработки."""
-
         return set(self._selected_uids)
 
     async def async_setup(self) -> None:
-        """Инициализировать фоновую обработку из options."""
-
         await self.async_refresh_from_options(initial=True)
 
     def async_stop(self) -> None:
-        """Остановить таймер фоновой обработки."""
-
         if self._unsubscribe:
             self._unsubscribe()
             self._unsubscribe = None
         self._selected_uids.clear()
-        self._has_pending_run = False
+        self._pending = False
 
     async def async_refresh_from_options(self, *, initial: bool = False) -> None:
-        """Перечитать настройки пользователя и обновить расписание."""
+        runtime = self._entry.runtime_data
+        manager = runtime.face_manager
+        if manager.recognition_mode == RECOGNITION_MODE_OFF:
+            self.async_stop()
+            _LOGGER.info("Фоновое распознавание выключено mode=off")
+            return
 
-        available = self._list_available_doors()
+        available = {
+            door.uid: door
+            for door in runtime.doors
+            if door.has_video and bool(door.image_url)
+        }
         if not available:
-            _LOGGER.debug(
-                "Для entry_id=%s нет домофонов с видео; фоновая обработка отключена",
-                self._entry.entry_id,
-            )
             self.async_stop()
             return
 
         option_value = self._entry.options.get(CONF_BACKGROUND_CAMERAS)
         if isinstance(option_value, list):
-            desired = {str(uid) for uid in option_value if str(uid) in available}
+            desired = {uid for uid in option_value if uid in available}
+        elif manager.list_known_face_names():
+            # Миграционная совместимость 1.x: если лица уже были настроены,
+            # основной видеодомофон продолжает работать без повторной настройки.
+            main = next((door for door in available.values() if door.is_main), None)
+            desired = {main.uid if main else next(iter(available))}
+            if not initial:
+                _LOGGER.info("Применена fallback background camera для старой конфигурации")
         else:
-            desired = set(calculate_default_background_uids(self._entry, available.values()))
-            if desired and not initial:
-                _LOGGER.info(
-                    "Для entry_id=%s применён резервный список фоновых камер: %s",
-                    self._entry.entry_id,
-                    ", ".join(sorted(desired)),
-                )
+            desired = set()
 
-        await self._async_apply_selection(desired, available)
+        self._apply_selection(desired)
 
-    async def async_force_cycle(self) -> None:
-        """Принудительно выполнить один цикл фоновой обработки."""
-
-        await self._async_process_selected()
-
-    async def _async_apply_selection(
-        self, desired: set[str], available: dict[str, dict[str, Any]]
-    ) -> None:
-        if desired == self._selected_uids:
-            _LOGGER.debug(
-                "Список фоновых камер entry_id=%s не изменился: %s",
-                self._entry.entry_id,
-                ", ".join(sorted(desired)) or "<пусто>",
-            )
+    def _apply_selection(self, desired: set[str]) -> None:
+        if desired == self._selected_uids and self._unsubscribe:
             return
-
-        self._selected_uids = {uid for uid in desired if uid in available}
         if self._unsubscribe:
             self._unsubscribe()
             self._unsubscribe = None
-
+        self._selected_uids = set(desired)
         if not self._selected_uids:
-            _LOGGER.info("Фоновая обработка отключена для entry_id=%s", self._entry.entry_id)
+            _LOGGER.info("Фоновая обработка камер отключена")
             return
-
-        _LOGGER.info(
-            "Фоновая обработка entry_id=%s: cameras=%s interval=%ss",
-            self._entry.entry_id,
-            ", ".join(sorted(self._selected_uids)),
-            self._interval,
-        )
         self._unsubscribe = self._scheduler(
             self._hass,
             self._async_schedule_handler,
             timedelta(seconds=self._interval),
         )
-
-    def _list_available_doors(self) -> dict[str, dict[str, Any]]:
-        domain_store = self._hass.data.get(DOMAIN, {})
-        entry_store = domain_store.get(self._entry.entry_id, {})
-        door_openers = entry_store.get(DATA_DOOR_OPENERS, []) or []
-        result: dict[str, dict[str, Any]] = {}
-        for door in door_openers:
-            uid = door.get("uid")
-            if isinstance(uid, str) and _is_video_capable(door):
-                result[uid] = door
-        return result
-
-    async def _async_schedule_handler(self, now: Optional[Any]) -> None:
-        _LOGGER.debug(
-            "Сработал таймер фоновой обработки entry_id=%s time=%s",
+        _LOGGER.info(
+            "Фоновая обработка включена: entry_id=%s cameras=%s interval=%.1fs",
             self._entry.entry_id,
-            now,
+            len(self._selected_uids),
+            self._interval,
         )
+
+    async def _async_schedule_handler(self, _now: Any) -> None:
+        await self._async_process_selected()
+
+    async def async_force_cycle(self) -> None:
         await self._async_process_selected()
 
     async def _async_process_selected(self) -> None:
         if not self._selected_uids:
             return
         if self._lock.locked():
-            _LOGGER.debug(
-                "Фоновый цикл entry_id=%s уже выполняется; запрос отмечен как pending",
-                self._entry.entry_id,
-            )
-            self._has_pending_run = True
+            self._pending = True
             return
 
         run_again = False
         async with self._lock:
             try:
-                entry_store = self._hass.data.get(DOMAIN, {}).get(self._entry.entry_id, {})
-                manager = entry_store.get(DATA_FACE_MANAGER)
-                if manager is None:
-                    _LOGGER.debug(
-                        "Фоновый цикл entry_id=%s пропущен: face manager недоступен",
-                        self._entry.entry_id,
-                    )
-                    return
-
-                default_open = entry_store.get(DATA_OPEN_DOOR)
-                doors = self._list_available_doors()
-                if not doors:
-                    self.async_stop()
-                    return
-
+                runtime = self._entry.runtime_data
                 for uid in list(self._selected_uids):
-                    door = doors.get(uid)
-                    if not door:
+                    door = runtime.door_manager.get(uid)
+                    if door is None or not door.image_url:
                         self._selected_uids.discard(uid)
                         continue
-                    await self._async_process_single(manager, door, default_open)
-
-                if not self._selected_uids and self._unsubscribe:
-                    self._unsubscribe()
-                    self._unsubscribe = None
+                    image = await runtime.snapshot_manager.async_get_snapshot(
+                        door.uid, door.image_url
+                    )
+                    if not image:
+                        failures = self._snapshot_failures.get(uid, 0) + 1
+                        self._snapshot_failures[uid] = failures
+                        if failures >= 3:
+                            _LOGGER.info(
+                                "Три ошибки снимка door=%s; обновляем временные ссылки",
+                                safe_door_ref(uid),
+                            )
+                            self._snapshot_failures[uid] = 0
+                            await runtime.door_manager.async_refresh()
+                        continue
+                    self._snapshot_failures[uid] = 0
+                    await runtime.face_manager.async_process_image(
+                        uid,
+                        image,
+                        door.callback,
+                    )
             finally:
-                run_again = self._has_pending_run
-                self._has_pending_run = False
+                run_again = self._pending
+                self._pending = False
 
         if run_again:
             self._hass.async_create_task(self._async_process_selected())
-
-    async def _async_process_single(
-        self,
-        manager,
-        door: dict[str, Any],
-        default_open: Callable[[], Any] | None,
-    ) -> None:
-        uid = str(door.get("uid"))
-        image_url = door.get("image_url")
-        if not image_url:
-            return
-
-        snapshot_manager = get_snapshot_manager(self._hass, self._entry)
-        image_bytes = await snapshot_manager.async_get_snapshot(uid, image_url)
-        if not image_bytes:
-            return
-
-        open_callback = door.get("callback") or default_open
-        try:
-            await manager.async_process_image(uid, image_bytes, open_callback)
-        except Exception as err:  # pragma: no cover - защитная ветка
-            _LOGGER.exception(
-                "Ошибка фонового анализа uid=%s entry_id=%s: %s",
-                uid,
-                self._entry.entry_id,
-                err,
-            )

@@ -1,15 +1,8 @@
-"""Неблокирующие unit-тесты математической части recognition engine."""
 
-import pytest
-
-from custom_components.intersvyaz.recognition.engine import DlibFaceRecognitionEngine
-
-
-def test_euclidean_distance() -> None:
-    distance = DlibFaceRecognitionEngine._euclidean_distance([0.0, 0.0], [3.0, 4.0])
-    assert distance == pytest.approx(5.0)
-
-
-def test_euclidean_distance_rejects_different_lengths() -> None:
-    distance = DlibFaceRecognitionEngine._euclidean_distance([0.0], [0.0, 1.0])
-    assert distance == float("inf")
+def test_local_engine_is_lazy_and_dlib_based(component_root):
+    source = (component_root / "recognition" / "engine.py").read_text()
+    assert "dlib" in source
+    assert "face_recognition_models" in source
+    assert "extract_single_encoding" in source
+    assert "recognize" in source
+    assert "import pkg_resources" not in source

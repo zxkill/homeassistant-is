@@ -1,108 +1,75 @@
 """Безопасная диагностика интеграции Intersvyaz."""
 from __future__ import annotations
 
+import logging
 from typing import Any
 
-from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
-from .const import (
-    CONF_BACKGROUND_CAMERAS,
-    CONF_KNOWN_FACES,
-    DATA_DOOR_OPENERS,
-    DATA_FACE_MANAGER,
-    DOMAIN,
-)
+from .const import CONF_BACKGROUND_CAMERAS, CONF_KNOWN_FACES
+from .runtime import IntersvyazConfigEntry
+from .security import REDACTED, redact_mapping
 
-_REDACTED = "**REDACTED**"
-_SENSITIVE_KEYS = {
-    "token",
-    "mobile_token",
-    "crm_token",
-    "authorization",
-    "phone",
-    "phone_number",
-    "device_id",
-    "unique_device_id",
-    "mac",
-    "door_mac",
-    "address",
-    "door_address",
-    "open_link",
-    "door_open_link",
-    "image_url",
-    "door_image_url",
-    "relay_payload",
-    "face_encoding",
-}
-
-
-def _redact(value: Any, *, key: str = "") -> Any:
-    """Рекурсивно удалить секреты и персональные данные из диагностики."""
-
-    normalized_key = key.lower()
-    if normalized_key in _SENSITIVE_KEYS or normalized_key.endswith("token"):
-        return _REDACTED
-    if isinstance(value, dict):
-        return {str(item_key): _redact(item_value, key=str(item_key)) for item_key, item_value in value.items()}
-    if isinstance(value, list):
-        return [_redact(item, key=key) for item in value]
-    if isinstance(value, tuple):
-        return [_redact(item, key=key) for item in value]
-    return value
+_LOGGER = logging.getLogger("custom_components.intersvyaz.diagnostics")
 
 
 async def async_get_config_entry_diagnostics(
     hass: HomeAssistant,
-    entry: ConfigEntry,
+    entry: IntersvyazConfigEntry,
 ) -> dict[str, Any]:
     """Вернуть диагностические данные без токенов, адресов и биометрии."""
 
-    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id, {})
-    doors = runtime.get(DATA_DOOR_OPENERS, []) or []
-    manager = runtime.get(DATA_FACE_MANAGER)
-
-    door_summary = []
-    for door in doors:
-        if not isinstance(door, dict):
-            continue
-        door_summary.append(
-            {
-                "uid": _REDACTED,
-                "is_main": bool(door.get("is_main")),
-                "is_shared": bool(door.get("is_shared")),
-                "has_video": bool(door.get("has_video")),
-                "has_open_link": bool(door.get("open_link")),
-                "has_image_url": bool(door.get("image_url")),
-                "has_callback": callable(door.get("callback")),
-            }
-        )
-
-    known_faces_count = 0
-    engine_available = None
-    if manager is not None:
-        try:
-            known_faces_count = len(manager.list_known_face_names())
-        except Exception:
-            known_faces_count = -1
-        engine_available = bool(getattr(manager, "library_available", False))
-
+    runtime = entry.runtime_data
     options = dict(entry.options)
     options.pop(CONF_KNOWN_FACES, None)
 
-    return {
+    doors = [
+        {
+            "uid": REDACTED,
+            "is_main": door.is_main,
+            "is_shared": door.is_shared,
+            "has_video": door.has_video,
+            "has_open_link": bool(door.open_link),
+            "has_image_url": bool(door.image_url),
+            "status_code": door.status_code,
+            "callback_available": callable(door.callback),
+        }
+        for door in runtime.doors
+    ]
+
+    try:
+        known_faces_count = len(runtime.face_manager.list_known_face_names())
+        engine_available = bool(runtime.face_manager.library_available)
+        recognition_mode = runtime.face_manager.recognition_mode
+    except Exception:  # pragma: no cover - diagnostics must never break HA UI
+        _LOGGER.exception("Не удалось собрать часть диагностики распознавания")
+        known_faces_count = -1
+        engine_available = False
+        recognition_mode = "unknown"
+
+    result = {
         "entry": {
-            "title": _REDACTED,
-            "data": _redact(dict(entry.data)),
-            "options": _redact(options),
+            "entry_id": entry.entry_id,
+            "version": entry.version,
+            "data": redact_mapping(dict(entry.data)),
+            "options": redact_mapping(options),
         },
         "runtime": {
-            "door_count": len(door_summary),
-            "doors": door_summary,
+            "door_count": len(doors),
+            "doors": doors,
+            "known_faces_count": known_faces_count,
+            "recognition_engine_available": engine_available,
+            "recognition_mode": recognition_mode,
             "background_camera_count": len(
                 entry.options.get(CONF_BACKGROUND_CAMERAS, []) or []
             ),
-            "known_faces_count": known_faces_count,
-            "recognition_engine_available": engine_available,
+            "snapshot_cache_entries": runtime.snapshot_manager.cache_size,
         },
     }
+    _LOGGER.debug(
+        "Диагностика подготовлена: entry_id=%s doors=%s faces=%s",
+        entry.entry_id,
+        len(doors),
+        known_faces_count,
+    )
+    return result

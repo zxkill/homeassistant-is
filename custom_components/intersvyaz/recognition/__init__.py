@@ -1,4 +1,4 @@
-"""Локальный движок распознавания лиц Intersvyaz."""
+"""Локальный recognition engine Intersvyaz."""
 
 from .engine import DlibFaceRecognitionEngine, FaceRecognitionResult
 
