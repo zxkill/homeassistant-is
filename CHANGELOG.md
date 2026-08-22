@@ -1,5 +1,12 @@
 # Changelog
 
+## 2.0.13
+
+- Реальный HLS-тест показал vendor-specific поведение CDN Интерсвязи: media playlist для live-камеры содержит один MPEG-TS сегмент примерно на 10 секунд и `#EXT-X-ENDLIST`. Для Home Assistant/PyAV/go2rtc это корректный конечный VOD-клип, поэтому поток закономерно завершался через один сегмент.
+- Добавлен отдельный `yard_live_playlist.py`: только такой односегментный `ENDLIST`-playlist преобразуется в небольшой rolling live playlist без `ENDLIST`.
+- При каждом повторном запросе upstream media playlist новый segment URI получает собственный монотонный `#EXT-X-MEDIA-SEQUENCE`; proxy держит окно последних четырёх сегментов. Стандартные live HLS и обычные многосегментные VOD playlists не изменяются.
+- Добавлены безопасные логи `[YARD_HLS_PROXY][LIVE_ADAPT]`/`[LIVE_WAIT]` с sequence/window без URL, токенов, UUID и адресов.
+- Добавлены regression-тесты на первый segment, повторный poll, продвижение sequence, rolling window и отсутствие вмешательства в обычный HLS.
 ## 2.0.12
 
 - Исправлен HLS proxy после реального теста Home Assistant/PyAV/go2rtc: вложенный playlist теперь определяется не только по `.m3u8`/Content-Type, но и по фактической сигнатуре `#EXTM3U`. Это закрывает CDN endpoints с неточным MIME или URL без расширения.
