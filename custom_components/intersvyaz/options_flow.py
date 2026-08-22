@@ -84,7 +84,10 @@ class IntersvyazOptionsFlow(OptionsFlow):
         menu_options = ["recognition_settings", "add_face"]
         if names:
             menu_options.append("remove_face")
-        if any(door.has_video and door.image_url for door in self._typed_entry.runtime_data.doors):
+        runtime = self._typed_entry.runtime_data
+        if runtime.live_yard_cameras or any(
+            door.has_video and door.image_url for door in runtime.doors
+        ):
             menu_options.append("background_cameras")
 
         return self.async_show_menu(
@@ -313,19 +316,46 @@ class IntersvyazOptionsFlow(OptionsFlow):
     ) -> ConfigFlowResult:
         """Выбрать камеры для фонового анализа."""
 
-        doors = [
-            door
-            for door in self._typed_entry.runtime_data.doors
-            if door.has_video and door.image_url
+        runtime = self._typed_entry.runtime_data
+        yard_cameras = [
+            camera
+            for camera in runtime.live_yard_cameras
+            if camera.snapshot_url
         ]
-        if not doors:
-            self._last_error = "Нет доступных домофонов с камерой"
+        doors = [
+            door for door in runtime.doors if door.has_video and door.image_url
+        ]
+        if yard_cameras:
+            choices = {
+                camera.uid: camera.address or camera.name or "Камера Интерсвязи"
+                for camera in yard_cameras
+            }
+        else:
+            choices = {door.uid: door.address or "Домофон" for door in doors}
+        if not choices:
+            self._last_error = "Нет доступных камер"
             return await self.async_step_init()
 
-        choices = {door.uid: door.address or "Домофон" for door in doors}
         selected = self._entry.options.get(CONF_BACKGROUND_CAMERAS, [])
         if not isinstance(selected, list):
             selected = []
+        if yard_cameras:
+            migrated_selected: list[str] = []
+            for uid in selected:
+                if uid in choices:
+                    migrated_selected.append(uid)
+                    continue
+                mapped = next(
+                    (
+                        camera.uid
+                        for camera in yard_cameras
+                        if camera.matched_door_uid == uid
+                    ),
+                    None,
+                )
+                if mapped:
+                    migrated_selected.append(mapped)
+            selected = migrated_selected
 
         schema = vol.Schema(
             {

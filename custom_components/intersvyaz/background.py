@@ -1,4 +1,4 @@
-"""Фоновая обработка снимков выбранных домофонов."""
+"""Фоновая обработка снимков выбранных камер Intersvyaz."""
 from __future__ import annotations
 
 import asyncio
@@ -63,23 +63,56 @@ class DoorBackgroundProcessor:
             _LOGGER.info("Фоновое распознавание выключено mode=off")
             return
 
-        available = {
+        yard_available = {
+            camera.uid: camera
+            for camera in runtime.live_yard_cameras
+            if bool(camera.snapshot_url)
+        }
+        door_available = {
             door.uid: door
             for door in runtime.doors
             if door.has_video and bool(door.image_url)
         }
-        if not available:
+        available_uids = set(yard_available) if yard_available else set(door_available)
+        if not available_uids:
             self.async_stop()
             return
 
         option_value = self._entry.options.get(CONF_BACKGROUND_CAMERAS)
         if isinstance(option_value, list):
-            desired = {uid for uid in option_value if uid in available}
+            desired: set[str] = set()
+            for uid in option_value:
+                if uid in available_uids:
+                    desired.add(uid)
+                    continue
+                # 2.0.7 хранил door UID. После появления yard API бесшовно
+                # переносим выбор на камеру, сопоставленную с тем же домофоном.
+                if yard_available:
+                    mapped = next(
+                        (
+                            camera.uid
+                            for camera in yard_available.values()
+                            if camera.matched_door_uid == uid
+                        ),
+                        None,
+                    )
+                    if mapped:
+                        desired.add(mapped)
         elif manager.list_known_face_names():
-            # Миграционная совместимость 1.x: если лица уже были настроены,
-            # основной видеодомофон продолжает работать без повторной настройки.
-            main = next((door for door in available.values() if door.is_main), None)
-            desired = {main.uid if main else next(iter(available))}
+            if yard_available:
+                main_door = runtime.default_door
+                main_camera = next(
+                    (
+                        camera
+                        for camera in yard_available.values()
+                        if main_door and camera.matched_door_uid == main_door.uid
+                    ),
+                    None,
+                )
+                desired = {main_camera.uid if main_camera else next(iter(yard_available))}
+            else:
+                main = next((door for door in door_available.values() if door.is_main), None)
+                desired = {main.uid if main else next(iter(door_available))}
             if not initial:
                 _LOGGER.info("Применена fallback background camera для старой конфигурации")
         else:
@@ -127,29 +160,31 @@ class DoorBackgroundProcessor:
             try:
                 runtime = self._entry.runtime_data
                 for uid in list(self._selected_uids):
-                    door = runtime.door_manager.get(uid)
-                    if door is None or not door.image_url:
+                    target = self._resolve_target(uid)
+                    if target is None:
                         self._selected_uids.discard(uid)
                         continue
+                    snapshot_uid, recognition_uid, image_url, callback, refresh = target
                     image = await runtime.snapshot_manager.async_get_snapshot(
-                        door.uid, door.image_url
+                        snapshot_uid,
+                        image_url,
                     )
                     if not image:
                         failures = self._snapshot_failures.get(uid, 0) + 1
                         self._snapshot_failures[uid] = failures
                         if failures >= 3:
                             _LOGGER.info(
-                                "Три ошибки снимка door=%s; обновляем временные ссылки",
+                                "Три ошибки снимка source=%s; обновляем временные ссылки",
                                 safe_door_ref(uid),
                             )
                             self._snapshot_failures[uid] = 0
-                            await runtime.door_manager.async_refresh()
+                            await refresh()
                         continue
                     self._snapshot_failures[uid] = 0
                     await runtime.face_manager.async_process_image(
-                        uid,
+                        recognition_uid,
                         image,
-                        door.callback,
+                        callback,
                     )
             finally:
                 run_again = self._pending
@@ -157,3 +192,36 @@ class DoorBackgroundProcessor:
 
         if run_again:
             self._hass.async_create_task(self._async_process_selected())
+
+    def _resolve_target(self, uid: str):
+        runtime = self._entry.runtime_data
+        camera = runtime.yard_camera_manager.get(uid)
+        if camera is not None and camera.snapshot_url:
+            if camera.matched_door_uid:
+                door = runtime.door_manager.get(camera.matched_door_uid)
+                if door is not None:
+                    return (
+                        camera.uid,
+                        door.uid,
+                        camera.snapshot_url,
+                        door.callback,
+                        runtime.yard_camera_manager.async_refresh,
+                    )
+            return (
+                camera.uid,
+                camera.uid,
+                camera.snapshot_url,
+                None,
+                runtime.yard_camera_manager.async_refresh,
+            )
+
+        door = runtime.door_manager.get(uid)
+        if door is not None and door.image_url:
+            return (
+                door.uid,
+                door.uid,
+                door.image_url,
+                door.callback,
+                runtime.door_manager.async_refresh,
+            )
+        return None

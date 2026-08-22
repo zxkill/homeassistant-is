@@ -4,7 +4,7 @@ from __future__ import annotations
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 
 from .const import DOMAIN
-from .models import DoorRuntime
+from .models import DoorRuntime, YardCameraRuntime
 
 
 def account_device_info(entry_id: str, *, name: str = "Intersvyaz") -> DeviceInfo:
@@ -28,5 +28,18 @@ def door_device_info(entry_id: str, door: DoorRuntime) -> DeviceInfo:
         name=f"Intersvyaz — {name}",
         manufacturer='АО "Интерсвязь"',
         model="Smart intercom",
+        via_device=(DOMAIN, entry_id),
+    )
+
+
+def yard_camera_device_info(entry_id: str, camera: YardCameraRuntime) -> DeviceInfo:
+    """Отдельное camera-only устройство, если у камеры нет relay-домофона."""
+
+    name = camera.address.strip() or camera.name.strip() or "Камера Интерсвязи"
+    return DeviceInfo(
+        identifiers={(DOMAIN, camera.uid)},
+        name=f"Intersvyaz — {name}",
+        manufacturer='АО "Интерсвязь"',
+        model="Yard camera",
         via_device=(DOMAIN, entry_id),
     )

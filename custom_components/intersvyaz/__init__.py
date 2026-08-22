@@ -39,6 +39,7 @@ from .face_manager import FaceRecognitionManager
 from .runtime import IntersvyazConfigEntry, IntersvyazRuntimeData
 from .services import async_setup_services
 from .snapshot import DoorSnapshotManager
+from .yard_camera_manager import YardCameraManager
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz")
 
@@ -92,6 +93,9 @@ async def async_setup_entry(
     except IntersvyazAuthError as err:
         raise ConfigEntryAuthFailed("Требуется повторная авторизация Интерсвязи") from err
 
+    yard_camera_manager = YardCameraManager(hass, entry, api, door_manager.doors)
+    await yard_camera_manager.async_setup()
+
     snapshot_manager = DoorSnapshotManager(hass)
     face_manager = FaceRecognitionManager(hass, entry)
     runtime = IntersvyazRuntimeData(
@@ -100,6 +104,7 @@ async def async_setup_entry(
         door_manager=door_manager,
         snapshot_manager=snapshot_manager,
         face_manager=face_manager,
+        yard_camera_manager=yard_camera_manager,
     )
     entry.runtime_data = runtime
 
@@ -107,13 +112,15 @@ async def async_setup_entry(
     runtime.background_processor = background
     await background.async_setup()
     door_manager.start_periodic_refresh()
+    yard_camera_manager.start_periodic_refresh()
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _LOGGER.info(
-        "Intersvyaz готов: entry_id=%s doors=%s recognition=%s",
+        "Intersvyaz готов: entry_id=%s doors=%s yard_cameras=%s recognition=%s",
         entry.entry_id,
         len(runtime.doors),
+        len(runtime.live_yard_cameras),
         face_manager.recognition_mode,
     )
     return True
@@ -135,6 +142,7 @@ async def async_unload_entry(
         runtime.background_processor.async_stop()
     await runtime.face_manager.async_stop()
     runtime.door_manager.stop()
+    runtime.yard_camera_manager.stop()
     runtime.snapshot_manager.invalidate()
     return True
 

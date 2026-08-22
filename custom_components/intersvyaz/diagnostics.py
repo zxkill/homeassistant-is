@@ -37,6 +37,19 @@ async def async_get_config_entry_diagnostics(
         for door in runtime.doors
     ]
 
+    yard_cameras = [
+        {
+            "uid": REDACTED,
+            "live_access": camera.live_access,
+            "archive_access": camera.archive_access,
+            "movement_access": camera.movement_access,
+            "has_snapshot_url": bool(camera.snapshot_url),
+            "has_hls_url": bool(camera.hls_url),
+            "matched_to_door": bool(camera.matched_door_uid),
+        }
+        for camera in runtime.yard_cameras
+    ]
+
     try:
         known_faces_count = len(runtime.face_manager.list_known_face_names())
         engine_available = bool(runtime.face_manager.library_available)
@@ -57,6 +70,9 @@ async def async_get_config_entry_diagnostics(
         "runtime": {
             "door_count": len(doors),
             "doors": doors,
+            "yard_camera_count": len(yard_cameras),
+            "yard_live_camera_count": sum(1 for item in yard_cameras if item["live_access"]),
+            "yard_cameras": yard_cameras,
             "known_faces_count": known_faces_count,
             "recognition_engine_available": engine_available,
             "recognition_mode": recognition_mode,
@@ -67,9 +83,10 @@ async def async_get_config_entry_diagnostics(
         },
     }
     _LOGGER.debug(
-        "Диагностика подготовлена: entry_id=%s doors=%s faces=%s",
+        "Диагностика подготовлена: entry_id=%s doors=%s yard_cameras=%s faces=%s",
         entry.entry_id,
         len(doors),
+        len(yard_cameras),
         known_faces_count,
     )
     return result

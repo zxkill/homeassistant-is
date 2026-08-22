@@ -1,10 +1,4 @@
-"""Единый событийный слой Intersvyaz.
-
-Событие одновременно:
-1. публикуется в Home Assistant event bus для обратной совместимости и YAML-автоматизаций;
-2. отправляется через dispatcher в EventEntity конкретного домофона;
-3. обновляет runtime last_visitors, если событие относится к посетителю.
-"""
+"""Единый событийный слой Intersvyaz."""
 from __future__ import annotations
 
 import logging
@@ -38,16 +32,28 @@ _BUS_EVENT_BY_TYPE = {
 }
 
 
-def _door_metadata(entry: IntersvyazConfigEntry, door_uid: str) -> dict[str, Any]:
-    door = next((item for item in entry.runtime_data.doors if item.uid == door_uid), None)
-    if door is None:
-        return {"door_uid": door_uid}
-    return {
-        "door_uid": door.uid,
-        "door_name": door.address or "Домофон",
-        "is_main": door.is_main,
-        "is_shared": door.is_shared,
-    }
+def _door_metadata(entry: IntersvyazConfigEntry, source_uid: str) -> dict[str, Any]:
+    door = next((item for item in entry.runtime_data.doors if item.uid == source_uid), None)
+    if door is not None:
+        return {
+            "door_uid": door.uid,
+            "door_name": door.address or "Домофон",
+            "is_main": door.is_main,
+            "is_shared": door.is_shared,
+            "source_type": "door",
+        }
+
+    camera = entry.runtime_data.yard_camera_manager.get(source_uid)
+    if camera is not None:
+        return {
+            "door_uid": camera.uid,
+            "door_name": camera.address or camera.name or "Камера Интерсвязи",
+            "is_main": False,
+            "is_shared": True,
+            "source_type": "yard_camera",
+            "porch": camera.porch,
+        }
+    return {"door_uid": source_uid, "source_type": "unknown"}
 
 
 def emit_door_event(
@@ -57,7 +63,7 @@ def emit_door_event(
     event_type: str,
     data: dict[str, Any] | None = None,
 ) -> None:
-    """Опубликовать событие домофона во все стандартные каналы HA."""
+    """Опубликовать событие домофона/камеры во все стандартные каналы HA."""
 
     payload = {
         "entry_id": entry.entry_id,
@@ -84,7 +90,7 @@ def emit_door_event(
     )
 
     _LOGGER.info(
-        "Door event: entry_id=%s door=%s type=%s person_present=%s",
+        "Door event: entry_id=%s source=%s type=%s person_present=%s",
         entry.entry_id,
         safe_door_ref(door_uid),
         event_type,
@@ -101,12 +107,9 @@ def face_payload(
     streak: int,
     required_matches: int,
 ) -> dict[str, Any]:
-    """Собрать стабильный payload распознавания."""
-
     rounded_distance = round(float(distance), 4) if distance is not None else None
     match_score = None
     if rounded_distance is not None:
-        # Это удобный относительный score, а не вероятность/биометрическая confidence.
         match_score = round(max(0.0, min(1.0, 1.0 - rounded_distance)), 4)
     return {
         "person": person,

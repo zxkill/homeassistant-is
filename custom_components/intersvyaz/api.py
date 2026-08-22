@@ -23,9 +23,13 @@ from .const import (
     DEFAULT_APP_VERSION,
     DEFAULT_BUYER_ID,
     DEFAULT_CRM_BASE_URL,
+    DEFAULT_CAMERAS_BASE_URL,
     DEFAULT_PLATFORM,
     DEFAULT_TIMEOUT,
     DEFAULT_USER_AGENT,
+    YARD_APP_VERSION,
+    YARD_USER_AGENT,
+    YARD_WITH_GROUP_ENDPOINT,
     GET_TOKEN_ENDPOINT,
     HEADER_AUTHORIZATION,
     RELAYS_ENDPOINT,
@@ -55,6 +59,7 @@ from .api_models import (
     safe_str,
 )
 from .api_transport import IntersvyazHttpTransport
+from .yard_models import YardGroupInfo, parse_yard_groups
 
 class IntersvyazApiClient:
     """Высокоуровневый API-клиент Интерсвязи."""
@@ -65,6 +70,7 @@ class IntersvyazApiClient:
         *,
         api_base_url: str = DEFAULT_API_BASE_URL,
         crm_base_url: str = DEFAULT_CRM_BASE_URL,
+        cameras_base_url: str = DEFAULT_CAMERAS_BASE_URL,
         request_timeout: int = DEFAULT_TIMEOUT,
         device_id: str | None = None,
         app_version: str = DEFAULT_APP_VERSION,
@@ -77,6 +83,7 @@ class IntersvyazApiClient:
         self._transport = IntersvyazHttpTransport(session, request_timeout)
         self._api_base_url = api_base_url.rstrip("/")
         self._crm_base_url = crm_base_url.rstrip("/")
+        self._cameras_base_url = cameras_base_url.rstrip("/")
         self._device_id = device_id or generate_device_id()
         self._app_version = app_version
         self._platform = platform
@@ -88,9 +95,10 @@ class IntersvyazApiClient:
         self._crm_token: CrmToken | None = None
 
         _LOGGER.debug(
-            "Создан API client: api=%s crm=%s buyer_id=%s device_id=<redacted>",
+            "Создан API client: api=%s crm=%s cameras=%s buyer_id=%s device_id=<redacted>",
             self._api_base_url,
             self._crm_base_url,
+            self._cameras_base_url,
             self._buyer_id,
         )
 
@@ -299,6 +307,36 @@ class IntersvyazApiClient:
             raise IntersvyazApiError("API вернул неожиданный формат списка домофонов")
         return [parse_relay_info(item) for item in response if isinstance(item, dict)]
 
+    async def async_get_yard_groups(self) -> list[YardGroupInfo]:
+        """Получить все группы и камеры, доступные аккаунту в «Умном дворе»."""
+
+        self._ensure_mobile_token()
+        headers = self._build_yard_headers()
+        _LOGGER.info("[YARD_CAMERAS][FETCH_BEGIN]")
+        response = await self._request(
+            base_url=self._cameras_base_url,
+            method="GET",
+            endpoint=YARD_WITH_GROUP_ENDPOINT,
+            headers=headers,
+        )
+        if not isinstance(response, list):
+            raise IntersvyazApiError("API камер вернул неожиданный формат")
+        groups = parse_yard_groups(response)
+        camera_count = sum(len(group.cameras) for group in groups)
+        live_count = sum(
+            1
+            for group in groups
+            for camera in group.cameras
+            if camera.live_access
+        )
+        _LOGGER.info(
+            "[YARD_CAMERAS][FETCH_OK] groups=%s cameras=%s live=%s",
+            len(groups),
+            camera_count,
+            live_count,
+        )
+        return groups
+
     async def async_open_door(
         self,
         mac: str | None = None,
@@ -421,6 +459,27 @@ class IntersvyazApiClient:
         if include_bearer and self._mobile_token:
             headers[HEADER_AUTHORIZATION] = f"Bearer {self._mobile_token.token}"
         return headers
+
+    def _build_yard_headers(self) -> dict[str, str]:
+        """Заголовки cams.is74.ru по формату официального мобильного клиента."""
+
+        self._ensure_mobile_token()
+        assert self._mobile_token is not None
+        return {
+            "Accept": "application/json",
+            "App-Version": YARD_APP_VERSION,
+            "X-App-Version": YARD_APP_VERSION,
+            "X-Api-Source": self._api_source,
+            "X-Source": self._api_source,
+            "Platform": self._platform,
+            "User-Agent": YARD_USER_AGENT,
+            "X-Device-Id": self._device_id,
+            "X-api-profile-id": str(self._mobile_token.profile_id),
+            "X-Api-User-Id": str(self._mobile_token.user_id),
+            "Accept-Language": self._accept_language,
+            "Content-Type": "application/json",
+            HEADER_AUTHORIZATION: f"Bearer {self._mobile_token.token}",
+        }
 
     def _build_crm_headers(
         self, *, include_crm_bearer: bool, include_mobile_bearer: bool = False

@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.8
+
+- Добавлен отдельный клиент камер `cams.is74.ru/api/yard-with-group`.
+- Home Assistant теперь создаёт камеры для всех доступных подъездов/дворов с `ACCESS.LIVE.STATUS=true`.
+- Добавлена поддержка HLS live stream через `MEDIA.HLS.LIVE.MAIN`, а snapshot берётся из `MEDIA.SNAPSHOT.LIVE.MAIN`.
+- Основная камера сопоставляется с существующим relay-домофоном по адресу/подъезду и сохраняет прежний `unique_id`, чтобы не создавать дубль сущности.
+- Камеры без доступной функции открытия создаются как отдельные camera-only устройства.
+- Добавлен `YardCameraManager`: обновление временных media URL, безопасный fallback и reload при изменении состава камер.
+- Все cameras API URL с bearer-параметрами остаются только в runtime и не выводятся в diagnostics/log.
+- Фоновое распознавание теперь может использовать любую доступную yard-камеру; для camera-only источников auto-open принципиально недоступен.
+- Добавлены EventEntity и сенсор последнего посетителя для camera-only камер.
+- Добавлено подробное логирование `[YARD_CAMERAS][...]` без раскрытия адресов, UUID и токенов.
+
 ## 2.0.7
 
 - Полностью удалены `opencv-python-headless` и `opencv-contrib-python-headless`. Причина: официальный Home Assistant Container/HA OS основан на Alpine/musl, а OpenCV публикует Linux wheels в формате manylinux/glibc; Home Assistant поэтому выбирал sdist и пытался собирать OpenCV внутри контейнера.
