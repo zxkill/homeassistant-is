@@ -13,6 +13,7 @@ from homeassistant.exceptions import HomeAssistantError
 from .const import (
     CONF_AUTO_OPEN_COOLDOWN_SECONDS,
     CONF_FACE_ENCODING,
+    CONF_FACE_ENGINE,
     CONF_FACE_EVENT_COOLDOWN_SECONDS,
     CONF_FACE_NAME,
     CONF_KNOWN_FACES,
@@ -22,6 +23,7 @@ from .const import (
     DEFAULT_RECOGNITION_MODE,
     DOOR_EVENT_FACE_RECOGNIZED,
     DOOR_EVENT_UNKNOWN_PERSON,
+    FACE_ENGINE_OPENCV_LBP_V1,
     FACE_EVENT_COOLDOWN_SECONDS,
     FACE_RECOGNITION_COOLDOWN_SECONDS,
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
@@ -33,7 +35,7 @@ from .const import (
     RECOGNITION_MODES,
 )
 from .events import emit_door_event, face_payload
-from .recognition import DlibFaceRecognitionEngine, FaceRecognitionResult
+from .recognition import OpenCvFaceRecognitionEngine, FaceRecognitionResult
 from .runtime import IntersvyazConfigEntry
 from .security import safe_door_ref
 
@@ -42,13 +44,18 @@ _LOGGER = logging.getLogger("custom_components.intersvyaz.face_manager")
 
 @dataclass(slots=True)
 class KnownFace:
-    """Сохранённый dlib descriptor известного человека."""
+    """Сохранённый локальный descriptor известного человека."""
 
     name: str
     encoding: list[float] = field(default_factory=list)
+    engine: str = FACE_ENGINE_OPENCV_LBP_V1
 
     def as_dict(self) -> dict[str, object]:
-        return {CONF_FACE_NAME: self.name, CONF_FACE_ENCODING: list(self.encoding)}
+        return {
+            CONF_FACE_NAME: self.name,
+            CONF_FACE_ENCODING: list(self.encoding),
+            CONF_FACE_ENGINE: self.engine,
+        }
 
 
 @dataclass(slots=True)
@@ -65,11 +72,11 @@ class FaceRecognitionManager:
         hass: HomeAssistant,
         entry: IntersvyazConfigEntry,
         *,
-        engine: DlibFaceRecognitionEngine | None = None,
+        engine: OpenCvFaceRecognitionEngine | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
-        self._engine = engine or DlibFaceRecognitionEngine()
+        self._engine = engine or OpenCvFaceRecognitionEngine()
         self._known_faces: list[KnownFace] = []
         self._last_frame_hash: dict[str, bytes] = {}
         self._door_open_cooldown: dict[str, float] = {}
@@ -92,7 +99,7 @@ class FaceRecognitionManager:
             self._mode,
             self._threshold,
             self._required_matches,
-            self.library_available,
+            self._engine.engine_id,
         )
 
     @property
@@ -178,7 +185,9 @@ class FaceRecognitionManager:
             self._engine.extract_single_encoding, image_bytes
         )
         self._known_faces = [face for face in self._known_faces if face.name != normalized_name]
-        self._known_faces.append(KnownFace(normalized_name, encoding))
+        self._known_faces.append(
+            KnownFace(normalized_name, encoding, self._engine.engine_id)
+        )
         await self._async_store_faces(ensure_safe_mode=True)
         _LOGGER.info("Лицо зарегистрировано: descriptor=%s total_faces=%s", len(encoding), len(self._known_faces))
 
@@ -361,14 +370,25 @@ class FaceRecognitionManager:
                 continue
             name = item.get(CONF_FACE_NAME)
             encoding = item.get(CONF_FACE_ENCODING)
+            engine = item.get(CONF_FACE_ENGINE)
             if not isinstance(name, str) or not isinstance(encoding, Iterable):
+                continue
+            if engine != FACE_ENGINE_OPENCV_LBP_V1:
+                _LOGGER.warning(
+                    "Лицо '%s' пропущено: descriptor создан старым движком (%s). "
+                    "После обновления до OpenCV его нужно добавить заново.",
+                    name.strip() or "<без имени>",
+                    engine or "legacy_dlib",
+                )
                 continue
             try:
                 vector = [float(value) for value in encoding]
             except (TypeError, ValueError):
                 continue
             if name.strip() and len(vector) == 128:
-                self._known_faces.append(KnownFace(name.strip(), vector))
+                self._known_faces.append(
+                    KnownFace(name.strip(), vector, FACE_ENGINE_OPENCV_LBP_V1)
+                )
 
     async def _async_store_faces(self, *, ensure_safe_mode: bool = False) -> None:
         options = dict(self._entry.options)
