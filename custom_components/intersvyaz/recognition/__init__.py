@@ -1,5 +1,5 @@
-"""Локальный recognition engine Intersvyaz."""
+"""Локальный изолированный движок распознавания лиц Intersvyaz."""
 
-from .engine import DlibFaceRecognitionEngine, FaceRecognitionResult
+from .engine import FaceRecognitionResult, OpenCvFaceRecognitionEngine
 
-__all__ = ["DlibFaceRecognitionEngine", "FaceRecognitionResult"]
+__all__ = ["FaceRecognitionResult", "OpenCvFaceRecognitionEngine"]

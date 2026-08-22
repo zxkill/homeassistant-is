@@ -95,7 +95,7 @@
         },
         "data_description": {
           "recognition_mode": "Controls whether recognition is off, event-only, or allowed to open the door automatically.",
-          "recognition_threshold": "Dlib distance: lower values require a stricter match.",
+          "recognition_threshold": "Normalized OpenCV/LBP distance: lower values require a stricter match.",
           "recognition_required_matches": "How many consecutive frames must match the same person before confirmation.",
           "auto_open_cooldown_seconds": "Minimum time between automatic openings of the same intercom.",
           "face_event_cooldown_seconds": "Suppresses duplicate recognition events for this duration."

@@ -4,13 +4,13 @@ import json
 def test_manifest_is_stable_v2(component_root):
     manifest = json.loads((component_root / "manifest.json").read_text())
     assert manifest["domain"] == "intersvyaz"
-    assert manifest["version"] == "2.0.4"
+    assert manifest["version"] == "2.0.5"
     assert manifest["config_flow"] is True
     assert manifest["integration_type"] == "hub"
-    assert "dlib-bin==20.0.1" in manifest["requirements"]
-    assert "face-recognition-models==0.3.0" in manifest["requirements"]
+    assert "opencv-python-headless==4.14.0.94" in manifest["requirements"]
     assert "numpy==2.3.2" in manifest["requirements"]
-    assert "Pillow==12.3.0" in manifest["requirements"]
+    assert not any("dlib" in item.lower() for item in manifest["requirements"])
+    assert not any("face-recognition" in item.lower() for item in manifest["requirements"])
 
 
 def test_hacs_metadata(repo_root):

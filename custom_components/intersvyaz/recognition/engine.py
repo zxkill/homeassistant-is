@@ -1,9 +1,9 @@
 """Изолированный локальный движок распознавания лиц Intersvyaz.
 
-Нативный ``dlib`` намеренно НЕ импортируется в процессе Home Assistant.
-Он запускается в отдельном worker-процессе. Это важно для стабильности:
-если бинарный wheel dlib несовместим с инструкциями старого CPU и завершается
-SIGILL/SIGSEGV, падает только worker, а Home Assistant продолжает работать.
+Нативный OpenCV намеренно НЕ импортируется в процессе Home Assistant.
+Он запускается в отдельном worker-процессе. Поэтому даже если бинарный wheel
+оказался несовместим с конкретным CPU и завершился SIGILL/SIGSEGV/SIGBUS,
+падает только worker, а Home Assistant продолжает работать.
 """
 from __future__ import annotations
 
@@ -47,8 +47,10 @@ class FaceRecognitionResult:
         return self.matched_name is not None
 
 
-class DlibFaceRecognitionEngine:
-    """Клиент изолированного dlib worker-процесса."""
+class OpenCvFaceRecognitionEngine:
+    """Клиент изолированного OpenCV worker-процесса."""
+
+    engine_id = "opencv_lbp_v1"
 
     def __init__(self, *, timeout_seconds: float = _WORKER_TIMEOUT_SECONDS) -> None:
         self._timeout_seconds = max(float(timeout_seconds), 5.0)
@@ -61,15 +63,15 @@ class DlibFaceRecognitionEngine:
     def available(self) -> bool:
         """Можно ли попытаться запустить локальное распознавание.
 
-        Проверка намеренно не импортирует dlib. Сам импорт происходит только
-        в дочернем процессе, чтобы несовместимый native wheel не мог уронить HA.
+        Проверка намеренно не импортирует cv2/numpy. Сам импорт происходит только
+        в дочернем процессе, чтобы native wheel не мог уронить Home Assistant.
         """
 
         if self._fatal_error is not None:
             return False
         return all(
             importlib.util.find_spec(module_name) is not None
-            for module_name in ("dlib", "face_recognition_models", "numpy", "PIL")
+            for module_name in ("cv2", "numpy")
         )
 
     @property
@@ -79,7 +81,7 @@ class DlibFaceRecognitionEngine:
         return self._fatal_error
 
     def extract_single_encoding(self, image_bytes: bytes) -> list[float]:
-        """Получить 128-мерный descriptor ровно одного лица."""
+        """Получить 128-мерный локальный LBP descriptor ровно одного лица."""
 
         if not image_bytes:
             raise HomeAssistantError("Пустое изображение невозможно обработать")
@@ -171,9 +173,10 @@ class DlibFaceRecognitionEngine:
             command = str(payload.get("command") or "unknown")
 
             _LOGGER.debug(
-                "Recognition worker request id=%s command=%s",
+                "Recognition worker request id=%s command=%s engine=%s",
                 request_id,
                 command,
+                self.engine_id,
             )
 
             try:
@@ -202,10 +205,11 @@ class DlibFaceRecognitionEngine:
 
             if not ready:
                 _LOGGER.error(
-                    "Recognition worker timeout id=%s command=%s timeout=%.1fs",
+                    "Recognition worker timeout id=%s command=%s timeout=%.1fs engine=%s",
                     request_id,
                     command,
                     self._timeout_seconds,
+                    self.engine_id,
                 )
                 self._stop_worker_locked(reason="timeout", mark_fatal=False)
                 raise HomeAssistantError(
@@ -220,9 +224,10 @@ class DlibFaceRecognitionEngine:
                 response = json.loads(line)
             except json.JSONDecodeError as err:
                 _LOGGER.error(
-                    "Recognition worker protocol error id=%s bytes=%s",
+                    "Recognition worker protocol error id=%s bytes=%s engine=%s",
                     request_id,
                     len(line),
+                    self.engine_id,
                 )
                 self._stop_worker_locked(reason="invalid JSON", mark_fatal=False)
                 raise HomeAssistantError(
@@ -237,9 +242,10 @@ class DlibFaceRecognitionEngine:
             response_id = response.get("request_id")
             if response_id != request_id:
                 _LOGGER.error(
-                    "Recognition worker response id mismatch expected=%s actual=%s",
+                    "Recognition worker response id mismatch expected=%s actual=%s engine=%s",
                     request_id,
                     response_id,
+                    self.engine_id,
                 )
                 self._stop_worker_locked(reason="request id mismatch", mark_fatal=False)
                 raise HomeAssistantError(
@@ -250,18 +256,20 @@ class DlibFaceRecognitionEngine:
                 error_text = str(response.get("error") or "Неизвестная ошибка")
                 error_code = str(response.get("error_code") or "worker_error")
                 _LOGGER.warning(
-                    "Recognition worker rejected id=%s command=%s code=%s error=%s",
+                    "Recognition worker rejected id=%s command=%s code=%s engine=%s error=%s",
                     request_id,
                     command,
                     error_code,
+                    self.engine_id,
                     error_text,
                 )
                 raise HomeAssistantError(error_text)
 
             _LOGGER.debug(
-                "Recognition worker response id=%s command=%s ok",
+                "Recognition worker response id=%s command=%s engine=%s ok",
                 request_id,
                 command,
+                self.engine_id,
             )
             return response
 
@@ -282,8 +290,9 @@ class DlibFaceRecognitionEngine:
             )
 
         _LOGGER.info(
-            "Запускаем изолированный recognition worker: python=%s",
+            "Запускаем изолированный recognition worker: python=%s engine=%s",
             sys.executable,
+            self.engine_id,
         )
         try:
             process = subprocess.Popen(
@@ -333,9 +342,10 @@ class DlibFaceRecognitionEngine:
                 )
                 self._fatal_error = message
                 _LOGGER.error(
-                    "Recognition worker аварийно завершён native-сигналом: %s. "
+                    "Recognition worker аварийно завершён native-сигналом: %s engine=%s. "
                     "Движок отключён, Home Assistant защищён от падения.",
                     signal_name,
+                    self.engine_id,
                 )
                 self._process = None
                 return message
@@ -347,8 +357,9 @@ class DlibFaceRecognitionEngine:
             )
             self._fatal_error = message
             _LOGGER.error(
-                "Recognition worker exited unexpectedly: exit_code=%s original_error=%s",
+                "Recognition worker exited unexpectedly: exit_code=%s engine=%s original_error=%s",
                 return_code,
+                self.engine_id,
                 original_error,
             )
             self._process = None
@@ -369,9 +380,10 @@ class DlibFaceRecognitionEngine:
             return
 
         _LOGGER.debug(
-            "Останавливаем recognition worker pid=%s reason=%s",
+            "Останавливаем recognition worker pid=%s reason=%s engine=%s",
             process.pid,
             reason,
+            self.engine_id,
         )
 
         if process.poll() is None:
@@ -398,3 +410,9 @@ class DlibFaceRecognitionEngine:
 
         if mark_fatal and self._fatal_error is None:
             self._fatal_error = f"Recognition worker остановлен: {reason}"
+
+
+__all__ = [
+    "FaceRecognitionResult",
+    "OpenCvFaceRecognitionEngine",
+]
