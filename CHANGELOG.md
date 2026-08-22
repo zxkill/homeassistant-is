@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.12
+
+- Исправлен HLS proxy после реального теста Home Assistant/PyAV/go2rtc: вложенный playlist теперь определяется не только по `.m3u8`/Content-Type, но и по фактической сигнатуре `#EXTM3U`. Это закрывает CDN endpoints с неточным MIME или URL без расширения.
+- Bearer query теперь сохраняется даже после upstream redirect: перед разбором дочерних URI токен переносится с исходного авторизованного URL на финальный URL ответа.
+- Для upstream HLS запросов query bearer дополнительно дублируется в стандартный `Authorization: Bearer ...`, а также отправляются безопасные `Origin`/`Referer` камеры. Значения credentials никогда не логируются.
+- Binary media proxy теперь сначала безопасно читает небольшой prefix для определения формата, затем отдаёт prefix и оставшийся поток без потери первых байтов.
+- Добавлены подробные stage-логи `[YARD_HLS_PROXY][ROOT_REQUEST|PLAYLIST_OK|LOCAL_MISS|LOCAL_DENY|UPSTREAM_ERROR|NETWORK_ERROR]` без URL, UUID, адресов и токенов.
+- HLS URL helpers вынесены в отдельный `yard_hls_utils.py`, чтобы URL/auth наследование тестировалось без загрузки Home Assistant.
 ## 2.0.11
 
 - Живой HLS больше не передаёт bearer-CDN URL напрямую в Home Assistant/FFmpeg/go2rtc. Добавлен локальный runtime HLS proxy внутри Home Assistant.

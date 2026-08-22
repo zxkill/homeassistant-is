@@ -135,7 +135,7 @@ data:
 - если cameras API временно недоступен, интеграция продолжает работать и использует старую relay-камеру как fallback;
 - временные CDN URL с bearer-токеном хранятся только в памяти и не сохраняются в ConfigEntry/diagnostics.
 
-Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream` и `custom_components.intersvyaz.yard_hls_proxy`. Логи `[YARD_STREAM]` показывают выбор upstream playlist, а `[YARD_HLS_PROXY]` — работу локального proxy/вложенных ресурсов. Эти логи не содержат bearer-token, UUID, адрес или upstream media URL.
+Если живой поток не запускается, в журнале Home Assistant можно отфильтровать `custom_components.intersvyaz.yard_stream` и `custom_components.intersvyaz.yard_hls_proxy`. Начиная с 2.0.12 proxy также определяет вложенные playlist по содержимому `#EXTM3U`, сохраняет bearer после CDN redirect и дублирует его в upstream `Authorization`, не раскрывая credential в журнале. Логи `[YARD_STREAM]` показывают выбор upstream playlist, а `[YARD_HLS_PROXY]` — работу локального proxy/вложенных ресурсов. Эти логи не содержат bearer-token, UUID, адрес или upstream media URL.
 
 В настройке **«Камеры фонового анализа»** можно выбрать любую доступную камеру двора для локального распознавания. Автоматическое открытие возможно только для камеры, которая сопоставлена с доступным пользователю домофоном открытия.
 
