@@ -71,6 +71,7 @@ CONF_DOOR_OPEN_LINK = "door_open_link"
 # Recognition options
 CONF_KNOWN_FACES = "known_faces"
 CONF_FACE_NAME = "face_name"
+CONF_FACE_PERSON_ENTITY_ID = "face_person_entity_id"
 CONF_FACE_ENCODING = "face_encoding"
 CONF_FACE_ENGINE = "face_engine"
 FACE_ENGINE_PORTABLE_V1 = "portable_face_v1"

@@ -74,13 +74,15 @@
           "recognition_settings": "Распознавание и автооткрытие",
           "add_face": "Добавить лицо",
           "remove_face": "Удалить лицо",
-          "background_cameras": "Камеры фонового анализа"
+          "background_cameras": "Камеры фонового анализа",
+          "link_face": "Связать лицо с человеком Home Assistant"
         },
         "menu_option_descriptions": {
           "recognition_settings": "Настроить режим распознавания, порог совпадения, подтверждение и безопасное автооткрытие.",
           "add_face": "Загрузить фотографию и добавить человека в локальную базу распознавания.",
           "remove_face": "Удалить ранее добавленного человека и его локальный биометрический дескриптор.",
-          "background_cameras": "Выбрать домофоны, снимки которых будут анализироваться в фоне."
+          "background_cameras": "Выбрать домофоны, снимки которых будут анализироваться в фоне.",
+          "link_face": "Сопоставить ранее добавленное лицо с существующей сущностью Person в Home Assistant."
         }
       },
       "recognition_settings": {
@@ -103,13 +105,13 @@
       },
       "add_face": {
         "title": "Добавить лицо",
-        "description": "Лучше использовать фронтальную фотографию одного человека без других лиц.\n\nТекущие лица:\n{known_faces}\n{error_message}",
+        "description": "Выберите существующего человека Home Assistant и загрузите фронтальную фотографию, где хорошо видно ровно одно лицо.\n\nТекущие лица:\n{known_faces}\n{error_message}",
         "data": {
-          "face_name": "Имя",
+          "face_person_entity_id": "Человек Home Assistant",
           "face_image": "Фотография"
         },
         "data_description": {
-          "face_name": "Имя, которое будет показано в событиях и сенсоре последнего посетителя.",
+          "face_person_entity_id": "Распознанное лицо будет связано с этой сущностью Person. Имя берётся из Home Assistant.",
           "face_image": "JPG/PNG с одним хорошо видимым лицом."
         }
       },
@@ -132,11 +134,24 @@
         "data_description": {
           "background_cameras": "Камеры, которые интеграция будет анализировать в фоне."
         }
+      },
+      "link_face": {
+        "title": "Связать лицо с человеком",
+        "description": "Лица, добавленные до 2.0.9, можно сопоставить с Person Home Assistant без повторной загрузки фотографии.\n\nНесопоставленные лица:\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Ранее добавленное лицо",
+          "face_person_entity_id": "Человек Home Assistant"
+        },
+        "data_description": {
+          "face_name": "Локальный descriptor, который нужно сопоставить.",
+          "face_person_entity_id": "Существующая сущность Person в Home Assistant."
+        }
       }
     },
     "error": {
       "add_failed": "Не удалось добавить лицо. Подробности есть в журнале Home Assistant.",
-      "remove_failed": "Не удалось удалить лицо. Подробности есть в журнале Home Assistant."
+      "remove_failed": "Не удалось удалить лицо. Подробности есть в журнале Home Assistant.",
+      "link_failed": "Не удалось сопоставить лицо с человеком. Подробности есть в журнале Home Assistant."
     }
   },
   "entity": {
@@ -210,6 +225,12 @@
     },
     "invalid_image_url": {
       "message": "image_url должен быть абсолютным HTTP- или HTTPS-адресом."
+    },
+    "face_identity_required": {
+      "message": "Для каждого лица нужно указать имя или человека Home Assistant."
+    },
+    "face_person_invalid": {
+      "message": "person_entity_id должен указывать на сущность Person."
     }
   },
   "services": {
@@ -238,6 +259,10 @@
           "name": "Имя",
           "description": "Имя при одиночном добавлении."
         },
+        "person_entity_id": {
+          "name": "Человек Home Assistant",
+          "description": "Необязательная сущность Person для сопоставления лица. Если указана, имя берётся из Home Assistant."
+        },
         "image_url": {
           "name": "URL фотографии",
           "description": "Абсолютный HTTP/HTTPS URL изображения."
@@ -254,13 +279,18 @@
     },
     "remove_known_face": {
       "name": "Удалить известное лицо",
-      "description": "Удаляет лицо из локальной базы распознавания.",
+      "description": "Удаляет лицо из локальной базы распознавания по имени или связанному человеку Home Assistant.",
       "fields": {
         "entry_id": {
           "name": "Аккаунт Интерсвязи"
         },
         "name": {
-          "name": "Имя"
+          "name": "Имя",
+          "description": "Имя для старых/несопоставленных записей."
+        },
+        "person_entity_id": {
+          "name": "Человек Home Assistant",
+          "description": "Связанная сущность Person, чьё лицо нужно удалить."
         }
       }
     }

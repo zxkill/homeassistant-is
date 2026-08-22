@@ -17,3 +17,8 @@ def test_monetary_sensor_uses_iso_currency_string(component_root):
     source = (component_root / "sensor.py").read_text()
     assert "UnitOfCurrency" not in source
     assert '_attr_native_unit_of_measurement = "RUB"' in source
+
+
+def test_last_visitor_exposes_person_entity_id(component_root):
+    source = (component_root / "sensor.py").read_text()
+    assert '"person_entity_id"' in source

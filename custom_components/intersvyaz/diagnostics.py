@@ -51,12 +51,15 @@ async def async_get_config_entry_diagnostics(
     ]
 
     try:
-        known_faces_count = len(runtime.face_manager.list_known_face_names())
+        known_faces = runtime.face_manager.list_known_faces()
+        known_faces_count = len(known_faces)
+        linked_people_count = sum(1 for face in known_faces if face.person_entity_id)
         engine_available = bool(runtime.face_manager.library_available)
         recognition_mode = runtime.face_manager.recognition_mode
     except Exception:  # pragma: no cover - diagnostics must never break HA UI
         _LOGGER.exception("Не удалось собрать часть диагностики распознавания")
         known_faces_count = -1
+        linked_people_count = -1
         engine_available = False
         recognition_mode = "unknown"
 
@@ -74,6 +77,7 @@ async def async_get_config_entry_diagnostics(
             "yard_live_camera_count": sum(1 for item in yard_cameras if item["live_access"]),
             "yard_cameras": yard_cameras,
             "known_faces_count": known_faces_count,
+            "linked_people_count": linked_people_count,
             "recognition_engine_available": engine_available,
             "recognition_mode": recognition_mode,
             "background_camera_count": len(

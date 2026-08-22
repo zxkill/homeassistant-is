@@ -101,6 +101,7 @@ def emit_door_event(
 def face_payload(
     *,
     person: str | None,
+    person_entity_id: str | None,
     distance: float | None,
     threshold: float,
     faces_detected: int,
@@ -113,6 +114,7 @@ def face_payload(
         match_score = round(max(0.0, min(1.0, 1.0 - rounded_distance)), 4)
     return {
         "person": person,
+        "person_entity_id": person_entity_id,
         "distance": rounded_distance,
         "match_score": match_score,
         "threshold": float(threshold),

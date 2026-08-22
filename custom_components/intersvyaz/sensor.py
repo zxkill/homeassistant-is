@@ -195,6 +195,7 @@ class IntersvyazLastVisitorSensor(SensorEntity):
         self._event_attributes = {
             key: payload.get(key)
             for key in (
+                "person_entity_id",
                 "distance",
                 "match_score",
                 "faces_detected",

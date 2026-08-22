@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable
 
 from homeassistant.core import HomeAssistant
@@ -16,6 +16,7 @@ from .const import (
     CONF_FACE_ENGINE,
     CONF_FACE_EVENT_COOLDOWN_SECONDS,
     CONF_FACE_NAME,
+    CONF_FACE_PERSON_ENTITY_ID,
     CONF_KNOWN_FACES,
     CONF_RECOGNITION_MODE,
     CONF_RECOGNITION_REQUIRED_MATCHES,
@@ -35,7 +36,13 @@ from .const import (
     RECOGNITION_MODES,
 )
 from .events import emit_door_event, face_payload
-from .recognition import PortableFaceRecognitionEngine, FaceRecognitionResult
+from .face_identity import (
+    KnownFace,
+    face_display_name,
+    normalize_person_entity_id,
+    resolve_person_name,
+)
+from .recognition import FaceRecognitionResult, PortableFaceRecognitionEngine
 from .runtime import IntersvyazConfigEntry
 from .security import safe_door_ref
 
@@ -43,24 +50,8 @@ _LOGGER = logging.getLogger("custom_components.intersvyaz.face_manager")
 
 
 @dataclass(slots=True)
-class KnownFace:
-    """Сохранённый локальный descriptor известного человека."""
-
-    name: str
-    encoding: list[float] = field(default_factory=list)
-    engine: str = FACE_ENGINE_PORTABLE_V1
-
-    def as_dict(self) -> dict[str, object]:
-        return {
-            CONF_FACE_NAME: self.name,
-            CONF_FACE_ENCODING: list(self.encoding),
-            CONF_FACE_ENGINE: self.engine,
-        }
-
-
-@dataclass(slots=True)
 class _MatchStreak:
-    name: str
+    identity_key: str
     count: int
 
 
@@ -93,9 +84,11 @@ class FaceRecognitionManager:
         self.refresh_options()
 
         _LOGGER.info(
-            "Face manager готов: entry_id=%s faces=%s mode=%s threshold=%.2f required=%s engine=%s",
+            "[FACE][READY] entry_id=%s faces=%s linked_people=%s mode=%s threshold=%.2f "
+            "required=%s engine=%s",
             entry.entry_id,
             len(self._known_faces),
+            sum(1 for face in self._known_faces if face.person_entity_id),
             self._mode,
             self._threshold,
             self._required_matches,
@@ -149,7 +142,7 @@ class FaceRecognitionManager:
             maximum=300,
         )
         _LOGGER.debug(
-            "Recognition options применены: mode=%s threshold=%.2f required=%s open_cooldown=%ss event_cooldown=%ss",
+            "[FACE][OPTIONS] mode=%s threshold=%.2f required=%s open_cooldown=%ss event_cooldown=%ss",
             self._mode,
             self._threshold,
             self._required_matches,
@@ -161,12 +154,41 @@ class FaceRecognitionManager:
         return list(self._known_faces)
 
     def list_known_face_names(self) -> list[str]:
-        return [face.name for face in self._known_faces]
+        """Сохранить старый API: вернуть отображаемые имена лиц."""
 
-    async def async_add_known_face(self, name: str, image_bytes: bytes) -> None:
-        """Добавить/заменить одно лицо по загруженной фотографии."""
+        return [self.display_name(face) for face in self._known_faces]
 
-        normalized_name = (name or "").strip()
+    def list_unlinked_faces(self) -> list[KnownFace]:
+        return [face for face in self._known_faces if not face.person_entity_id]
+
+    def display_name(self, face: KnownFace) -> str:
+        """Получить актуальное friendly_name связанного Person, если он доступен."""
+
+        return face_display_name(self._hass, face)
+
+    def face_choices(self, *, only_unlinked: bool = False) -> dict[str, str]:
+        """Вернуть choices identity_key -> человекочитаемая подпись для options flow."""
+
+        faces = self.list_unlinked_faces() if only_unlinked else self._known_faces
+        choices: dict[str, str] = {}
+        for face in faces:
+            label = self.display_name(face)
+            if face.person_entity_id:
+                label = f"{label} ({face.person_entity_id})"
+            choices[face.identity_key] = label
+        return choices
+
+    async def async_add_known_face(
+        self,
+        name: str,
+        image_bytes: bytes,
+        *,
+        person_entity_id: str | None = None,
+    ) -> None:
+        """Добавить/заменить лицо и при необходимости связать его с Person HA."""
+
+        normalized_person = normalize_person_entity_id(self._hass, person_entity_id)
+        normalized_name = resolve_person_name(self._hass, normalized_person, fallback=name)
         if not normalized_name:
             raise HomeAssistantError("Имя не может быть пустым")
         if not image_bytes:
@@ -177,28 +199,86 @@ class FaceRecognitionManager:
             )
 
         _LOGGER.info(
-            "Регистрация лица: entry_id=%s image_bytes=%s",
+            "[FACE][ENROLL_BEGIN] entry_id=%s image_bytes=%s linked_to_person=%s",
             self._entry.entry_id,
             len(image_bytes),
+            bool(normalized_person),
         )
         encoding = await self._hass.async_add_executor_job(
             self._engine.extract_single_encoding, image_bytes
         )
-        self._known_faces = [face for face in self._known_faces if face.name != normalized_name]
+
+        # Для Person Home Assistant одна личность должна иметь ровно одну активную запись.
+        # Одновременно заменяем старую legacy-запись с тем же именем, чтобы после миграции
+        # пользователь не получил два конкурирующих descriptor одного человека.
+        self._known_faces = [
+            face
+            for face in self._known_faces
+            if not (
+                (normalized_person and face.person_entity_id == normalized_person)
+                or (
+                    not face.person_entity_id
+                    and self.display_name(face).casefold() == normalized_name.casefold()
+                )
+            )
+        ]
         self._known_faces.append(
-            KnownFace(normalized_name, encoding, self._engine.engine_id)
+            KnownFace(
+                name=normalized_name,
+                encoding=encoding,
+                engine=self._engine.engine_id,
+                person_entity_id=normalized_person,
+            )
         )
         await self._async_store_faces(ensure_safe_mode=True)
-        _LOGGER.info("Лицо зарегистрировано: descriptor=%s total_faces=%s", len(encoding), len(self._known_faces))
+        _LOGGER.info(
+            "[FACE][ENROLL_OK] descriptor=%s total_faces=%s linked_to_person=%s",
+            len(encoding),
+            len(self._known_faces),
+            bool(normalized_person),
+        )
 
-    async def async_remove_known_face(self, name: str) -> None:
-        normalized_name = (name or "").strip()
-        before = len(self._known_faces)
-        self._known_faces = [face for face in self._known_faces if face.name != normalized_name]
-        if len(self._known_faces) == before:
-            raise HomeAssistantError(f"Лицо '{normalized_name}' не найдено")
+    async def async_link_known_face(
+        self, identity_key: str, person_entity_id: str
+    ) -> None:
+        """Связать уже существующий legacy descriptor с Person Home Assistant."""
+
+        face = self._find_face(identity_key)
+        if face is None:
+            raise HomeAssistantError("Выбранное лицо не найдено")
+        normalized_person = normalize_person_entity_id(self._hass, person_entity_id)
+        if not normalized_person:
+            raise HomeAssistantError("Не выбран человек Home Assistant")
+
+        new_name = resolve_person_name(self._hass, normalized_person, fallback=face.name)
+        self._known_faces = [
+            item
+            for item in self._known_faces
+            if item is face or item.person_entity_id != normalized_person
+        ]
+        face.person_entity_id = normalized_person
+        face.name = new_name
         await self._async_store_faces()
-        _LOGGER.info("Лицо удалено: total_faces=%s", len(self._known_faces))
+        _LOGGER.info(
+            "[FACE][LINK_OK] entry_id=%s linked_to_person=true total_faces=%s",
+            self._entry.entry_id,
+            len(self._known_faces),
+        )
+
+    async def async_remove_known_face(self, identifier: str) -> None:
+        """Удалить лицо по identity_key, имени или person entity_id."""
+
+        normalized = (identifier or "").strip()
+        before = len(self._known_faces)
+        self._known_faces = [
+            face
+            for face in self._known_faces
+            if not self._face_matches_identifier(face, normalized)
+        ]
+        if len(self._known_faces) == before:
+            raise HomeAssistantError(f"Лицо '{normalized}' не найдено")
+        await self._async_store_faces()
+        _LOGGER.info("[FACE][REMOVE_OK] total_faces=%s", len(self._known_faces))
 
     async def async_process_image(
         self,
@@ -219,7 +299,7 @@ class FaceRecognitionManager:
             return None
         self._last_frame_hash[door_uid] = digest
 
-        known = [(face.name, face.encoding) for face in self._known_faces]
+        known = [(face.identity_key, face.encoding) for face in self._known_faces]
         try:
             result = await self._hass.async_add_executor_job(
                 self._engine.recognize,
@@ -230,7 +310,7 @@ class FaceRecognitionManager:
         except HomeAssistantError as err:
             _LOGGER.warning("Ошибка анализа кадра door=%s: %s", safe_door_ref(door_uid), err)
             return None
-        except Exception as err:  # pragma: no cover
+        except Exception:  # pragma: no cover
             _LOGGER.exception("Неожиданная ошибка recognition door=%s", safe_door_ref(door_uid))
             return None
 
@@ -248,6 +328,7 @@ class FaceRecognitionManager:
                     DOOR_EVENT_UNKNOWN_PERSON,
                     face_payload(
                         person=None,
+                        person_entity_id=None,
                         distance=result.distance,
                         threshold=self._threshold,
                         faces_detected=result.faces_detected,
@@ -258,7 +339,18 @@ class FaceRecognitionManager:
                 self._mark_event(door_uid, DOOR_EVENT_UNKNOWN_PERSON)
             return result
 
-        streak = self._advance_streak(door_uid, result.matched_name)
+        matched_face = self._find_face(result.matched_name)
+        if matched_face is None:
+            _LOGGER.warning(
+                "[FACE][MATCH_ORPHAN] door=%s identity_key_hash=%s",
+                safe_door_ref(door_uid),
+                hashlib.blake2b(result.matched_name.encode(), digest_size=5).hexdigest(),
+            )
+            self._streaks.pop(door_uid, None)
+            return result
+
+        display_name = self.display_name(matched_face)
+        streak = self._advance_streak(door_uid, matched_face.identity_key)
         should_force_confirm_event = streak == self._required_matches
         if should_force_confirm_event or self._should_emit(
             door_uid, DOOR_EVENT_FACE_RECOGNIZED
@@ -269,7 +361,8 @@ class FaceRecognitionManager:
                 door_uid,
                 DOOR_EVENT_FACE_RECOGNIZED,
                 face_payload(
-                    person=result.matched_name,
+                    person=display_name,
+                    person_entity_id=matched_face.person_entity_id,
                     distance=result.distance,
                     threshold=self._threshold,
                     faces_detected=result.faces_detected,
@@ -324,9 +417,10 @@ class FaceRecognitionManager:
             return result
 
         _LOGGER.info(
-            "Auto-open подтверждён: door=%s streak=%s",
+            "Auto-open подтверждён: door=%s streak=%s linked_person=%s",
             safe_door_ref(door_uid),
             streak,
+            bool(matched_face.person_entity_id),
         )
         try:
             await open_callback()
@@ -353,10 +447,10 @@ class FaceRecognitionManager:
         _LOGGER.debug("Останавливаем face manager entry_id=%s", self._entry.entry_id)
         await self._hass.async_add_executor_job(self._engine.close)
 
-    def _advance_streak(self, door_uid: str, name: str) -> int:
+    def _advance_streak(self, door_uid: str, identity_key: str) -> int:
         current = self._streaks.get(door_uid)
-        if current is None or current.name != name:
-            current = _MatchStreak(name=name, count=1)
+        if current is None or current.identity_key != identity_key:
+            current = _MatchStreak(identity_key=identity_key, count=1)
         else:
             current.count += 1
         self._streaks[door_uid] = current
@@ -369,6 +463,25 @@ class FaceRecognitionManager:
     def _mark_event(self, door_uid: str, event_type: str) -> None:
         self._event_cooldown[(door_uid, event_type)] = time.monotonic()
 
+    def _find_face(self, identifier: str) -> KnownFace | None:
+        normalized = (identifier or "").strip()
+        return next(
+            (
+                face
+                for face in self._known_faces
+                if self._face_matches_identifier(face, normalized)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def _face_matches_identifier(face: KnownFace, identifier: str) -> bool:
+        return identifier in {
+            face.identity_key,
+            face.name,
+            face.person_entity_id or "",
+        }
+
     def _load_known_faces(self, stored: Iterable[dict[str, object]]) -> None:
         self._known_faces.clear()
         for item in stored or []:
@@ -377,6 +490,7 @@ class FaceRecognitionManager:
             name = item.get(CONF_FACE_NAME)
             encoding = item.get(CONF_FACE_ENCODING)
             engine = item.get(CONF_FACE_ENGINE)
+            person_entity_id = item.get(CONF_FACE_PERSON_ENTITY_ID)
             if not isinstance(name, str) or not isinstance(encoding, Iterable):
                 continue
             if engine != FACE_ENGINE_PORTABLE_V1:
@@ -392,10 +506,26 @@ class FaceRecognitionManager:
                 vector = [float(value) for value in encoding]
             except (TypeError, ValueError):
                 continue
+            normalized_person = (
+                str(person_entity_id).strip()
+                if isinstance(person_entity_id, str) and str(person_entity_id).startswith("person.")
+                else None
+            )
             if name.strip() and len(vector) == 128:
                 self._known_faces.append(
-                    KnownFace(name.strip(), vector, FACE_ENGINE_PORTABLE_V1)
+                    KnownFace(
+                        name=name.strip(),
+                        encoding=vector,
+                        engine=FACE_ENGINE_PORTABLE_V1,
+                        person_entity_id=normalized_person,
+                    )
                 )
+        _LOGGER.debug(
+            "[FACE][LOAD] faces=%s linked_people=%s legacy_unlinked=%s",
+            len(self._known_faces),
+            sum(1 for face in self._known_faces if face.person_entity_id),
+            sum(1 for face in self._known_faces if not face.person_entity_id),
+        )
 
     async def _async_store_faces(self, *, ensure_safe_mode: bool = False) -> None:
         options = dict(self._entry.options)
@@ -404,6 +534,12 @@ class FaceRecognitionManager:
             options[CONF_RECOGNITION_MODE] = DEFAULT_RECOGNITION_MODE
         self._hass.config_entries.async_update_entry(self._entry, options=options)
         self.refresh_options()
+        _LOGGER.debug(
+            "[FACE][STORE] entry_id=%s faces=%s linked_people=%s",
+            self._entry.entry_id,
+            len(self._known_faces),
+            sum(1 for face in self._known_faces if face.person_entity_id),
+        )
 
 
 def _clamp_float(value, *, default: float, minimum: float, maximum: float) -> float:
