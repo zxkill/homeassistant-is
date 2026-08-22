@@ -23,6 +23,7 @@ from homeassistant.components.http import KEY_HASS, HomeAssistantView
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import DOMAIN
+from .yard_live_playlist import RollingPlaylistState, adapt_single_segment_live_playlist
 from .yard_hls_utils import (
     build_upstream_headers,
     inherit_hls_token,
@@ -88,6 +89,7 @@ class YardHlsProxy:
         self._roots: dict[str, str] = {}
         self._camera_uids: dict[str, str] = {}
         self._resources: dict[str, _ProxyResource] = {}
+        self._rolling_playlists: dict[str, RollingPlaylistState] = {}
 
     def invalidate(self) -> None:
         """Forget temporary upstream URLs after camera catalogue refresh."""
@@ -95,6 +97,7 @@ class YardHlsProxy:
         self._roots.clear()
         self._camera_uids.clear()
         self._resources.clear()
+        self._rolling_playlists.clear()
         _LOGGER.debug("[YARD_HLS_PROXY][INVALIDATE] entry_id=%s", self._entry.entry_id)
 
     def build_stream_url(self, camera: YardCameraRuntime, upstream_url: str) -> str:
@@ -160,6 +163,7 @@ class YardHlsProxy:
             camera_ref=camera_ref,
             upstream_url=upstream_url,
             is_root=is_root,
+            resource_id=resource_id,
         )
 
     async def _async_proxy_upstream(
@@ -169,6 +173,7 @@ class YardHlsProxy:
         camera_ref: str,
         upstream_url: str,
         is_root: bool,
+        resource_id: str,
     ) -> web.StreamResponse:
         headers = build_upstream_headers(
             upstream_url,
@@ -233,6 +238,40 @@ class YardHlsProxy:
                             base_upstream_url=effective_base_url,
                             playlist=body.decode("utf-8-sig", errors="replace"),
                         )
+
+                        # The Intersvyaz CDN currently exposes some "live" feeds
+                        # as a finite one-segment (~10 s) HLS clip with ENDLIST.
+                        # PyAV/go2rtc correctly stop at ENDLIST. Convert only this
+                        # exact vendor shape into a rolling live media playlist.
+                        if not is_root:
+                            state = self._rolling_playlists.setdefault(
+                                resource_id, RollingPlaylistState()
+                            )
+                            adapted = adapt_single_segment_live_playlist(
+                                rewritten, state
+                            )
+                            if adapted.adapted:
+                                rewritten = adapted.playlist
+                                if adapted.new_segment or not state.announced:
+                                    _LOGGER.info(
+                                        "[YARD_HLS_PROXY][LIVE_ADAPT] camera=%s "
+                                        "new_segment=%s sequence=%s..%s window=%s",
+                                        camera_ref,
+                                        adapted.new_segment,
+                                        adapted.first_sequence,
+                                        adapted.last_sequence,
+                                        adapted.window_size,
+                                    )
+                                    state.announced = True
+                                else:
+                                    _LOGGER.debug(
+                                        "[YARD_HLS_PROXY][LIVE_WAIT] camera=%s "
+                                        "sequence=%s window=%s",
+                                        camera_ref,
+                                        adapted.last_sequence,
+                                        adapted.window_size,
+                                    )
+
                         _LOGGER.info(
                             "[YARD_HLS_PROXY][PLAYLIST_OK] camera=%s root=%s "
                             "bytes=%s resources=%s redirected=%s",
@@ -340,6 +379,7 @@ class YardHlsProxy:
         expired = [key for key, value in self._resources.items() if value.expires_at <= now]
         for key in expired:
             self._resources.pop(key, None)
+            self._rolling_playlists.pop(key, None)
         if len(self._resources) > 4096:
             oldest = sorted(self._resources.items(), key=lambda item: item[1].expires_at)
             for key, _resource in oldest[: len(self._resources) - 3072]:
