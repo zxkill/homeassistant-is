@@ -7,12 +7,14 @@ from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .api import IntersvyazApiClient, IntersvyazApiError, IntersvyazAuthError
 from .const import YARD_CAMERA_REFRESH_INTERVAL_HOURS
 from .models import DoorRuntime, YardCameraRuntime
 from .runtime import IntersvyazConfigEntry
 from .yard_models import YardCameraInfo, YardGroupInfo
+from .yard_stream import YardStreamResolver
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_camera_manager")
 
@@ -34,6 +36,7 @@ class YardCameraManager:
         self._cameras: list[YardCameraRuntime] = []
         self._refresh_unsub = None
         self._reload_scheduled = False
+        self._stream_resolver = YardStreamResolver(async_get_clientsession(hass))
 
     @property
     def cameras(self) -> list[YardCameraRuntime]:
@@ -124,6 +127,7 @@ class YardCameraManager:
                 len(fresh_by_uid),
             )
             self._cameras = fresh
+            self._stream_resolver.invalidate()
             if not self._reload_scheduled:
                 self._reload_scheduled = True
                 self._hass.async_create_task(
@@ -137,6 +141,7 @@ class YardCameraManager:
             self._entry.runtime_data.snapshot_manager.invalidate()
         except (AttributeError, RuntimeError):
             pass
+        self._stream_resolver.invalidate()
         _LOGGER.debug(
             "[YARD_CAMERAS][REFRESH_OK] entry_id=%s cameras=%s",
             self._entry.entry_id,
@@ -146,6 +151,30 @@ class YardCameraManager:
 
     def get(self, camera_uid: str) -> YardCameraRuntime | None:
         return next((camera for camera in self._cameras if camera.uid == camera_uid), None)
+
+    async def async_stream_source(self, camera_uid: str) -> str | None:
+        """Вернуть проверенный свежий HLS URL для Home Assistant stream."""
+
+        camera = self.get(camera_uid)
+        if camera is None or not camera.live_access:
+            return None
+
+        source = await self._stream_resolver.async_resolve(camera)
+        if source:
+            return source
+
+        # Токен в MEDIA URL может устареть раньше планового шестичасового refresh.
+        # Обновляем каталог один раз и повторяем probe уже с новыми URL.
+        _LOGGER.info(
+            "[YARD_STREAM][REFRESH_BEFORE_RETRY] entry_id=%s",
+            self._entry.entry_id,
+        )
+        if not await self.async_refresh():
+            return None
+        camera = self.get(camera_uid)
+        if camera is None or not camera.live_access:
+            return None
+        return await self._stream_resolver.async_resolve(camera, force=True)
 
     def _build_cameras(self, groups: list[YardGroupInfo]) -> list[YardCameraRuntime]:
         result: list[YardCameraRuntime] = []
@@ -168,9 +197,22 @@ class YardCameraManager:
     ) -> YardCameraRuntime:
         matched = self._match_door(info)
         if matched is not None and matched.uid in claimed_doors:
+            _LOGGER.debug(
+                "[YARD_CAMERAS][MATCH_SKIPPED] porch=%s reason=door_already_claimed",
+                info.porch,
+            )
             matched = None
         elif matched is not None:
             claimed_doors.add(matched.uid)
+            _LOGGER.debug(
+                "[YARD_CAMERAS][MATCH_OK] porch=%s matched=true",
+                info.porch,
+            )
+        else:
+            _LOGGER.debug(
+                "[YARD_CAMERAS][MATCH_NONE] porch=%s camera_only=true",
+                info.porch,
+            )
         return YardCameraRuntime(
             uid=f"{self._entry.entry_id}_yard_{info.uuid.lower()}",
             camera_id=info.camera_id,
@@ -214,8 +256,11 @@ class YardCameraManager:
         if len(candidates) == 1:
             return candidates[0]
 
-        porch_only = [door for door in self._doors if _normalize_porch(door.porch_num) == porch]
-        return porch_only[0] if len(porch_only) == 1 else None
+        # Никогда не сопоставляем только по номеру подъезда: в одном аккаунте
+        # могут быть домофоны разных домов с одинаковым номером подъезда.
+        # Именно такое сопоставление раньше могло «приклеить» камеру п.5 одного
+        # дома к домофону п.5 другого адреса и скрыть camera-only устройство.
+        return None
 
 
 def _normalize_address(value: str | None) -> str:
