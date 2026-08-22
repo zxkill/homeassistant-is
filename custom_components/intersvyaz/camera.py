@@ -117,14 +117,14 @@ class IntersvyazYardCamera(Camera):
         return image
 
     async def stream_source(self) -> str | None:
-        """Вернуть авторизованный HLS URL для штатного stream pipeline HA."""
+        """Вернуть проверенный HLS URL для штатного stream pipeline HA."""
 
         camera = self._camera
         if camera is None or not camera.live_access:
             return None
-        # Обычный multivariant HLS выбран как наиболее совместимый с HA/ffmpeg.
-        # LOW_LATENCY остаётся в runtime и может стать отдельной настройкой позже.
-        return camera.hls_url or camera.low_latency_hls_url
+        return await self._entry.runtime_data.yard_camera_manager.async_stream_source(
+            camera.uid
+        )
 
     def _recognition_target(self, camera: YardCameraRuntime):
         runtime = self._entry.runtime_data

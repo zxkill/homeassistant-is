@@ -77,7 +77,7 @@ def test_camera_platform_prefers_yard_api_and_keeps_relay_fallback(component_roo
     assert "IntersvyazYardCamera" in source
     assert "stream_source" in source
     assert "CameraEntityFeature.STREAM" in source
-    assert "camera.hls_url" in source
+    assert "yard_camera_manager.async_stream_source" in source
     assert "relay_fallback" in source
     assert 'f"{matched_door.uid}_camera"' in source
 
@@ -102,3 +102,26 @@ def test_background_can_use_yard_camera_and_never_auto_open_camera_only(componen
     assert "camera.uid," in source
     assert "None," in source
     assert "yard_camera_manager.async_refresh" in source
+
+
+def test_yard_camera_matching_never_falls_back_to_porch_only(component_root):
+    source = (component_root / "yard_camera_manager.py").read_text()
+    assert "porch_only" not in source
+    assert "_base_address(door.address) == base" in source
+    assert "Никогда не сопоставляем только по номеру подъезда" in source
+
+
+def test_yard_stream_resolver_validates_playlist_and_prefers_realtime(component_root):
+    source = (component_root / "yard_stream.py").read_text()
+    assert '"low_latency", camera.low_latency_hls_url' in source
+    assert '"main", camera.hls_url' in source
+    assert 'b"#EXTM3U"' in source
+    assert "[YARD_STREAM][PROBE]" in source
+    assert "url" not in source.split("[YARD_STREAM][PROBE]")[1].split("return response.status", 1)[0]
+
+
+def test_stream_source_refreshes_expired_media_urls(component_root):
+    manager = (component_root / "yard_camera_manager.py").read_text()
+    assert "async_stream_source" in manager
+    assert "[YARD_STREAM][REFRESH_BEFORE_RETRY]" in manager
+    assert "await self.async_refresh()" in manager
