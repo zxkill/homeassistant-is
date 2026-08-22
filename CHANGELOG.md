@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.0.15
+
+- Реальная PyAV/libav диагностика установила точную причину падения live HLS: CDN Интерсвязи отдаёт корректные MPEG-TS сегменты, но подписывает URL в форме `...segment.ts/<signature>`. Браузеры это принимают, а современный FFmpeg HLS demuxer с включённой проверкой расширений отклоняет такой URL как `not in allowed_segment_extensions`.
+- Добавлен минимальный `yard_hls_compat.py`: он не перестраивает live-поток и не меняет `MEDIA-SEQUENCE`, `EXTINF`, `ENDLIST` или буферизацию. Он только отдаёт media playlist локально и заменяет ссылки сегментов на локальные URL с конечным расширением `.ts`; сами байты MPEG-TS проксируются без изменений.
+- Добавлен чистый helper `yard_hls_rewrite.py` для определения скрытого расширения в путях вида `.ts/<signature>` и точечного переписывания URI.
+- `MEDIA.HLS.LIVE.MAIN` остаётся единственным источником для стандартного HA stream; `LOW_LATENCY/realtime=1` по-прежнему не используется.
+- Добавлены безопасные логи `[YARD_HLS_COMPAT][VIEW_READY|SOURCE_READY|MEDIA_RESOLVED|PLAYLIST_OK|MEDIA_OK|...]` без upstream URL, bearer, UUID и адресов.
+- Старые experimental rolling-HLS модули 2.0.11–2.0.13 по-прежнему не импортируются runtime-кодом.
 ## 2.0.14
 
 - Полностью переосмыслена работа live-video после прямой диагностики CDN: `MEDIA.HLS.LIVE.MAIN` сам по себе является нормальным rolling HLS — media playlist содержит 3 MPEG-TS сегмента, не имеет `#EXT-X-ENDLIST`, а `MEDIA-SEQUENCE` и последний segment URI регулярно меняются. Поведение одинаково для Python/Chrome/Safari User-Agent.

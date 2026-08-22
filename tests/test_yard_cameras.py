@@ -131,14 +131,16 @@ def test_stream_source_refreshes_expired_media_urls(component_root):
     assert "await self.async_refresh()" in manager
 
 
-def test_yard_stream_returns_direct_main_without_local_proxy(component_root):
+def test_yard_stream_uses_minimal_extension_compat_proxy(component_root):
     manager = (component_root / "yard_camera_manager.py").read_text()
     init_source = (component_root / "__init__.py").read_text()
-    assert "YardHlsProxy" not in manager
-    assert "build_stream_url" not in manager
-    assert "return source" in manager
-    assert "[YARD_STREAM][DIRECT_SOURCE]" in manager
-    assert "async_setup_yard_hls_proxy" not in init_source
+    compat = (component_root / "yard_hls_compat.py").read_text()
+    assert "YardHlsCompatProxy" in manager
+    assert "build_stream_url" in manager
+    assert "[YARD_STREAM][COMPAT_SOURCE]" in manager
+    assert "async_setup_yard_hls_compat" in init_source
+    assert "RollingPlaylistState" not in compat
+    assert "adapt_single_segment_live_playlist" not in compat
 
 
 def test_low_latency_is_not_used_as_standard_stream_fallback(component_root):
