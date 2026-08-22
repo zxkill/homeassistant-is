@@ -40,6 +40,7 @@ from .runtime import IntersvyazConfigEntry, IntersvyazRuntimeData
 from .services import async_setup_services
 from .snapshot import DoorSnapshotManager
 from .yard_camera_manager import YardCameraManager
+from .yard_hls_proxy import async_setup_yard_hls_proxy
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz")
 
@@ -55,7 +56,8 @@ async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
     """Set up integration-wide actions independently from config entries."""
 
     await async_setup_services(hass)
-    _LOGGER.debug("Глобальные actions Intersvyaz готовы")
+    await async_setup_yard_hls_proxy(hass)
+    _LOGGER.debug("Глобальные actions и HLS proxy Intersvyaz готовы")
     return True
 
 

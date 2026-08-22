@@ -125,3 +125,24 @@ def test_stream_source_refreshes_expired_media_urls(component_root):
     assert "async_stream_source" in manager
     assert "[YARD_STREAM][REFRESH_BEFORE_RETRY]" in manager
     assert "await self.async_refresh()" in manager
+
+
+def test_yard_stream_uses_local_proxy_and_hides_cdn_bearer(component_root):
+    manager = (component_root / "yard_camera_manager.py").read_text()
+    init_source = (component_root / "__init__.py").read_text()
+    proxy = (component_root / "yard_hls_proxy.py").read_text()
+    assert "YardHlsProxy" in manager
+    assert "build_stream_url" in manager
+    assert "async_setup_yard_hls_proxy" in init_source
+    assert 'requires_auth = False' in proxy
+    assert '?auth=' in proxy
+    assert '"token" in base_query' in proxy
+    assert "_rewrite_playlist" in proxy
+    assert "MEDIA URL" not in proxy
+
+
+def test_yard_stream_prefers_main_for_ffmpeg_compatibility(component_root):
+    source = (component_root / "yard_stream.py").read_text()
+    main_pos = source.index('(\"main\", camera.hls_url)')
+    low_pos = source.index('(\"low_latency\", camera.low_latency_hls_url)')
+    assert main_pos < low_pos

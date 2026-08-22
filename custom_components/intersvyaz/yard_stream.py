@@ -39,9 +39,9 @@ class YardStreamResolver:
     ) -> str | None:
         """Вернуть первый доступный HLS источник.
 
-        REALTIME/LOW_LATENCY проверяется первым: именно этот URL официальный
-        клиент использует для максимально близкого к live просмотра. Обычный
-        HLS остаётся безопасным fallback.
+        Обычный MAIN проверяется первым как наиболее совместимый HLS источник.
+        LOW_LATENCY остаётся fallback: официальный клиент умеет его проигрывать,
+        но сторонние ffmpeg/go2rtc реализации поддерживают LL-HLS неодинаково.
         """
 
         now = time.monotonic()
@@ -50,8 +50,8 @@ class YardStreamResolver:
             return cached[0]
 
         candidates = (
-            ("low_latency", camera.low_latency_hls_url),
             ("main", camera.hls_url),
+            ("low_latency", camera.low_latency_hls_url),
         )
         camera_ref = _safe_camera_ref(camera.uid)
 
