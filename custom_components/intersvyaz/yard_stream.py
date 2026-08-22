@@ -18,6 +18,7 @@ from .const import (
     YARD_STREAM_PROBE_TIMEOUT_SECONDS,
 )
 from .models import YardCameraRuntime
+from .yard_hls_utils import build_upstream_headers
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_stream")
 
@@ -81,9 +82,10 @@ class YardStreamResolver:
             async with asyncio.timeout(YARD_STREAM_PROBE_TIMEOUT_SECONDS):
                 async with self._session.get(
                     url,
-                    headers={
-                        "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
-                    },
+                    headers=build_upstream_headers(
+                        url,
+                        accept="application/vnd.apple.mpegurl,application/x-mpegURL,*/*",
+                    ),
                     allow_redirects=True,
                 ) as response:
                     # Master playlist маленький. Ограничиваем чтение, чтобы probe

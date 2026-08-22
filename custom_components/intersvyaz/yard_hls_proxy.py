@@ -1,15 +1,13 @@
-"""Локальный HLS proxy для камер Intersvyaz.
+"""Local HLS proxy for Intersvyaz yard cameras.
 
-CDN `cams.is74.ru` отдаёт master playlist с bearer-параметром в query string,
-но вложенные playlist/segment URL могут быть относительными. FFmpeg/go2rtc не
-обязаны наследовать query master URL при переходе к относительному ресурсу,
-поэтому прямой `MEDIA.HLS.*` URL способен открыться как playlist и затем оборваться.
-
-Proxy оставляет bearer только внутри runtime Home Assistant, переписывает все HLS
-URI на локальные URL и явно переносит upstream token на вложенные запросы.
+The camera CDN returns temporary bearer URLs. Home Assistant/PyAV/go2rtc must not
+receive those credentials directly, and HLS children may lose the master query on
+relative links or redirects. This proxy keeps credentials in runtime memory,
+rewrites every HLS URI to a local URL, and proxies playlists/media itself.
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
@@ -17,15 +15,22 @@ import secrets
 import time
 from dataclasses import dataclass
 from http import HTTPStatus
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
-from urllib.parse import parse_qsl, quote_plus, urljoin, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from aiohttp import ClientError, ClientSession, web
 from homeassistant.components.http import KEY_HASS, HomeAssistantView
 from homeassistant.helpers.network import NoURLAvailableError, get_url
 
 from .const import DOMAIN
+from .yard_hls_utils import (
+    build_upstream_headers,
+    inherit_hls_token,
+    is_playlist_hint,
+    looks_like_playlist,
+    resolve_hls_reference,
+    safe_suffix,
+)
 
 if TYPE_CHECKING:
     from homeassistant.core import HomeAssistant
@@ -39,14 +44,16 @@ _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_hls_proxy")
 _PROXY_REGISTERED_KEY = f"{DOMAIN}_yard_hls_proxy_registered"
 _PROXY_PATH = "/api/intersvyaz/hls/{entry_id}/{camera_ref}/{resource_id}"
 _ROOT_RESOURCE = "master.m3u8"
-_RESOURCE_TTL_SECONDS = 180
+_RESOURCE_TTL_SECONDS = 300
 _MAX_PLAYLIST_BYTES = 2 * 1024 * 1024
+_MEDIA_PEEK_BYTES = 16 * 1024
+_UPSTREAM_TIMEOUT_SECONDS = 20
 _URI_ATTRIBUTE_RE = re.compile(r'URI="([^"]+)"')
 
 
 @dataclass(slots=True)
 class _ProxyResource:
-    """Одно временное соответствие локального resource id upstream URL."""
+    """Temporary local resource ID -> upstream URL mapping."""
 
     camera_ref: str
     upstream_url: str
@@ -54,7 +61,7 @@ class _ProxyResource:
 
 
 async def async_setup_yard_hls_proxy(hass: HomeAssistant) -> None:
-    """Зарегистрировать единственный HTTP view на весь Home Assistant."""
+    """Register a single HTTP view for all Intersvyaz config entries."""
 
     if hass.data.get(_PROXY_REGISTERED_KEY):
         return
@@ -64,7 +71,7 @@ async def async_setup_yard_hls_proxy(hass: HomeAssistant) -> None:
 
 
 class YardHlsProxy:
-    """Runtime proxy одного config entry Intersvyaz."""
+    """Runtime HLS proxy owned by one Intersvyaz config entry."""
 
     def __init__(
         self,
@@ -83,7 +90,7 @@ class YardHlsProxy:
         self._resources: dict[str, _ProxyResource] = {}
 
     def invalidate(self) -> None:
-        """Удалить upstream media URL после обновления каталога камер."""
+        """Forget temporary upstream URLs after camera catalogue refresh."""
 
         self._roots.clear()
         self._camera_uids.clear()
@@ -91,7 +98,7 @@ class YardHlsProxy:
         _LOGGER.debug("[YARD_HLS_PROXY][INVALIDATE] entry_id=%s", self._entry.entry_id)
 
     def build_stream_url(self, camera: YardCameraRuntime, upstream_url: str) -> str:
-        """Сохранить upstream root и вернуть безопасный локальный stream URL."""
+        """Store upstream root and return a local credential-free stream URL."""
 
         camera_ref = _safe_camera_ref(camera.uid)
         self._roots[camera_ref] = upstream_url
@@ -114,28 +121,45 @@ class YardHlsProxy:
         camera_ref: str,
         resource_id: str,
     ) -> web.StreamResponse:
-        """Проксировать master/media playlist или бинарный media resource."""
+        """Proxy one master/media playlist or binary media resource."""
 
+        is_root = resource_id == _ROOT_RESOURCE
         if request.query.get("auth") != self._secret:
+            _LOGGER.warning(
+                "[YARD_HLS_PROXY][LOCAL_DENY] camera=%s root=%s reason=auth",
+                camera_ref,
+                is_root,
+            )
             return web.Response(status=HTTPStatus.UNAUTHORIZED, text="Invalid auth")
 
         self._prune_resources()
-        if resource_id == _ROOT_RESOURCE:
+        if is_root:
             upstream_url = self._roots.get(camera_ref)
             if not upstream_url:
+                _LOGGER.warning(
+                    "[YARD_HLS_PROXY][LOCAL_MISS] camera=%s root=true reason=no_root",
+                    camera_ref,
+                )
                 return web.Response(status=HTTPStatus.NOT_FOUND, text="Unknown camera")
         else:
             resource = self._resources.get(resource_id)
             if resource is None or resource.camera_ref != camera_ref:
+                _LOGGER.warning(
+                    "[YARD_HLS_PROXY][LOCAL_MISS] camera=%s root=false reason=no_resource",
+                    camera_ref,
+                )
                 return web.Response(status=HTTPStatus.NOT_FOUND, text="Unknown resource")
             resource.expires_at = time.monotonic() + _RESOURCE_TTL_SECONDS
             upstream_url = resource.upstream_url
+
+        if is_root:
+            _LOGGER.info("[YARD_HLS_PROXY][ROOT_REQUEST] camera=%s", camera_ref)
 
         return await self._async_proxy_upstream(
             request,
             camera_ref=camera_ref,
             upstream_url=upstream_url,
-            is_root=resource_id == _ROOT_RESOURCE,
+            is_root=is_root,
         )
 
     async def _async_proxy_upstream(
@@ -146,89 +170,111 @@ class YardHlsProxy:
         upstream_url: str,
         is_root: bool,
     ) -> web.StreamResponse:
-        headers = {
-            "Accept": "application/vnd.apple.mpegurl,application/x-mpegURL,video/*,*/*",
-            "Referer": "https://cams.is74.ru/",
-        }
+        headers = build_upstream_headers(
+            upstream_url,
+            accept="application/vnd.apple.mpegurl,application/x-mpegURL,video/*,*/*",
+        )
         if request.headers.get("Range"):
             headers["Range"] = request.headers["Range"]
 
         try:
-            async with self._session.get(
-                upstream_url,
-                headers=headers,
-                allow_redirects=True,
-            ) as response:
-                if response.status >= 400:
-                    _LOGGER.warning(
-                        "[YARD_HLS_PROXY][UPSTREAM_ERROR] camera=%s status=%s root=%s",
-                        camera_ref,
-                        response.status,
-                        is_root,
-                    )
-                    return web.Response(status=HTTPStatus.BAD_GATEWAY)
-
-                content_type = response.headers.get("Content-Type", "")
-                final_url = str(response.url)
-                if _is_playlist(final_url, content_type, is_root=is_root):
-                    body = await response.content.read(_MAX_PLAYLIST_BYTES + 1)
-                    if len(body) > _MAX_PLAYLIST_BYTES:
+            async with asyncio.timeout(_UPSTREAM_TIMEOUT_SECONDS):
+                async with self._session.get(
+                    upstream_url,
+                    headers=headers,
+                    allow_redirects=True,
+                ) as response:
+                    if response.status >= 400:
                         _LOGGER.warning(
-                            "[YARD_HLS_PROXY][PLAYLIST_TOO_LARGE] camera=%s",
-                            camera_ref,
-                        )
-                        return web.Response(status=HTTPStatus.BAD_GATEWAY)
-                    if b"#EXTM3U" not in body[:4096]:
-                        _LOGGER.warning(
-                            "[YARD_HLS_PROXY][INVALID_PLAYLIST] camera=%s status=%s bytes=%s",
+                            "[YARD_HLS_PROXY][UPSTREAM_ERROR] camera=%s status=%s root=%s",
                             camera_ref,
                             response.status,
-                            len(body),
+                            is_root,
                         )
                         return web.Response(status=HTTPStatus.BAD_GATEWAY)
-                    text = body.decode("utf-8", errors="replace")
-                    rewritten = self._rewrite_playlist(
-                        camera_ref=camera_ref,
-                        base_upstream_url=final_url,
-                        playlist=text,
-                    )
-                    _LOGGER.debug(
-                        "[YARD_HLS_PROXY][PLAYLIST] camera=%s root=%s bytes=%s resources=%s",
-                        camera_ref,
-                        is_root,
-                        len(body),
-                        len(self._resources),
-                    )
-                    return web.Response(
-                        text=rewritten,
-                        content_type="application/vnd.apple.mpegurl",
-                        headers={"Cache-Control": "no-store"},
-                    )
 
-                proxy_response = web.StreamResponse(status=response.status)
-                if content_type:
-                    proxy_response.content_type = content_type.split(";", 1)[0]
-                for header_name in ("Content-Range", "Accept-Ranges"):
-                    if value := response.headers.get(header_name):
-                        proxy_response.headers[header_name] = value
-                proxy_response.headers["Cache-Control"] = "no-store"
-                await proxy_response.prepare(request)
-                transferred = 0
-                async for chunk in response.content.iter_chunked(64 * 1024):
-                    transferred += len(chunk)
-                    await proxy_response.write(chunk)
-                await proxy_response.write_eof()
-                _LOGGER.debug(
-                    "[YARD_HLS_PROXY][MEDIA] camera=%s status=%s bytes=%s",
-                    camera_ref,
-                    response.status,
-                    transferred,
-                )
-                return proxy_response
-        except ClientError as err:
+                    content_type = response.headers.get("Content-Type", "")
+                    final_url = str(response.url)
+                    # Redirects may strip the credential query. Reattach it to the
+                    # effective base before resolving children from this response.
+                    effective_base_url = inherit_hls_token(final_url, upstream_url)
+
+                    prefix = await response.content.read(_MEDIA_PEEK_BYTES)
+                    playlist_by_payload = looks_like_playlist(prefix)
+                    playlist_by_hint = is_playlist_hint(
+                        final_url,
+                        content_type,
+                        is_root=is_root,
+                    )
+                    if playlist_by_payload or playlist_by_hint:
+                        body = prefix + await response.content.read(
+                            _MAX_PLAYLIST_BYTES + 1 - len(prefix)
+                        )
+                        if len(body) > _MAX_PLAYLIST_BYTES:
+                            _LOGGER.warning(
+                                "[YARD_HLS_PROXY][PLAYLIST_TOO_LARGE] camera=%s",
+                                camera_ref,
+                            )
+                            return web.Response(status=HTTPStatus.BAD_GATEWAY)
+                        if not looks_like_playlist(body):
+                            _LOGGER.warning(
+                                "[YARD_HLS_PROXY][INVALID_PLAYLIST] camera=%s "
+                                "status=%s root=%s bytes=%s hinted=%s",
+                                camera_ref,
+                                response.status,
+                                is_root,
+                                len(body),
+                                playlist_by_hint,
+                            )
+                            return web.Response(status=HTTPStatus.BAD_GATEWAY)
+
+                        rewritten = self._rewrite_playlist(
+                            camera_ref=camera_ref,
+                            base_upstream_url=effective_base_url,
+                            playlist=body.decode("utf-8-sig", errors="replace"),
+                        )
+                        _LOGGER.info(
+                            "[YARD_HLS_PROXY][PLAYLIST_OK] camera=%s root=%s "
+                            "bytes=%s resources=%s redirected=%s",
+                            camera_ref,
+                            is_root,
+                            len(body),
+                            len(self._resources),
+                            final_url != upstream_url,
+                        )
+                        return web.Response(
+                            text=rewritten,
+                            content_type="application/vnd.apple.mpegurl",
+                            headers={"Cache-Control": "no-store"},
+                        )
+
+                    proxy_response = web.StreamResponse(status=response.status)
+                    if content_type:
+                        proxy_response.content_type = content_type.split(";", 1)[0]
+                    for header_name in ("Content-Range", "Accept-Ranges"):
+                        if value := response.headers.get(header_name):
+                            proxy_response.headers[header_name] = value
+                    proxy_response.headers["Cache-Control"] = "no-store"
+                    await proxy_response.prepare(request)
+                    transferred = len(prefix)
+                    if prefix:
+                        await proxy_response.write(prefix)
+                    async for chunk in response.content.iter_chunked(64 * 1024):
+                        transferred += len(chunk)
+                        await proxy_response.write(chunk)
+                    await proxy_response.write_eof()
+                    _LOGGER.debug(
+                        "[YARD_HLS_PROXY][MEDIA] camera=%s status=%s bytes=%s",
+                        camera_ref,
+                        response.status,
+                        transferred,
+                    )
+                    return proxy_response
+        except (ClientError, asyncio.TimeoutError) as err:
             _LOGGER.warning(
-                "[YARD_HLS_PROXY][NETWORK_ERROR] camera=%s error=%s",
+                "[YARD_HLS_PROXY][NETWORK_ERROR] camera=%s root=%s error=%s",
                 camera_ref,
+                is_root,
                 type(err).__name__,
             )
             return web.Response(status=HTTPStatus.BAD_GATEWAY)
@@ -240,7 +286,7 @@ class YardHlsProxy:
         base_upstream_url: str,
         playlist: str,
     ) -> str:
-        """Переписать URI playlist/segment/key на защищённые локальные URL."""
+        """Rewrite playlist/segment/key URIs to protected local URLs."""
 
         output: list[str] = []
         for raw_line in playlist.splitlines():
@@ -251,7 +297,9 @@ class YardHlsProxy:
             if line.startswith("#"):
                 output.append(
                     _URI_ATTRIBUTE_RE.sub(
-                        lambda match: f'URI="{self._local_resource_url(camera_ref, base_upstream_url, match.group(1))}"',
+                        lambda match: (
+                            f'URI="{self._local_resource_url(camera_ref, base_upstream_url, match.group(1))}"'
+                        ),
                         raw_line,
                     )
                 )
@@ -267,7 +315,7 @@ class YardHlsProxy:
     ) -> str:
         if reference.startswith(("data:", "skd:")):
             return reference
-        upstream_url = _resolve_hls_reference(base_upstream_url, reference)
+        upstream_url = resolve_hls_reference(base_upstream_url, reference)
         resource_id = self._register_resource(camera_ref, upstream_url)
         base = _internal_base_url(self._hass)
         return (
@@ -279,8 +327,7 @@ class YardHlsProxy:
         digest = hashlib.sha256(
             f"{self._secret}|{camera_ref}|{upstream_url}".encode("utf-8")
         ).hexdigest()[:24]
-        suffix = _safe_suffix(upstream_url)
-        resource_id = f"{digest}{suffix}"
+        resource_id = f"{digest}{safe_suffix(upstream_url)}"
         self._resources[resource_id] = _ProxyResource(
             camera_ref=camera_ref,
             upstream_url=upstream_url,
@@ -300,7 +347,7 @@ class YardHlsProxy:
 
 
 class IntersvyazYardHlsProxyView(HomeAssistantView):
-    """HTTP endpoint, доступный только по runtime-secret из stream_source."""
+    """HTTP endpoint protected by a runtime-only secret."""
 
     requires_auth = False
     url = _PROXY_PATH
@@ -316,16 +363,18 @@ class IntersvyazYardHlsProxyView(HomeAssistantView):
         hass = request.app[KEY_HASS]
         entry = hass.config_entries.async_get_entry(entry_id)
         if entry is None or entry.domain != DOMAIN:
+            _LOGGER.warning("[YARD_HLS_PROXY][ENTRY_MISS]")
             return web.Response(status=HTTPStatus.NOT_FOUND)
         try:
             proxy = entry.runtime_data.yard_camera_manager.hls_proxy
         except (AttributeError, RuntimeError):
+            _LOGGER.warning("[YARD_HLS_PROXY][RUNTIME_UNAVAILABLE] entry_id=%s", entry_id)
             return web.Response(status=HTTPStatus.SERVICE_UNAVAILABLE)
         return await proxy.async_handle(request, camera_ref, resource_id)
 
 
 def _internal_base_url(hass: HomeAssistant) -> str:
-    """Получить URL, доступный stream worker из самого Home Assistant."""
+    """Return an URL reachable by HA stream worker and local go2rtc."""
 
     api = hass.config.api
     if api is not None and not api.use_ssl:
@@ -342,54 +391,6 @@ def _internal_base_url(hass: HomeAssistant) -> str:
         port = api.port if api is not None else 8123
         scheme = "https" if api is not None and api.use_ssl else "http"
         return f"{scheme}://127.0.0.1:{port}"
-
-
-def _resolve_hls_reference(base_url: str, reference: str) -> str:
-    """Разрешить URI и явно унаследовать bearer token master playlist."""
-
-    absolute = urljoin(base_url, reference)
-    base_parts = urlsplit(base_url)
-    target_parts = urlsplit(absolute)
-    if target_parts.scheme not in {"http", "https"}:
-        return absolute
-
-    base_query = dict(parse_qsl(base_parts.query, keep_blank_values=True))
-    target_keys = {
-        key for key, _value in parse_qsl(target_parts.query, keep_blank_values=True)
-    }
-    query = target_parts.query
-    # CDN авторизует media resources через token query. RFC URL resolution не
-    # переносит query master playlist на относительный child/segment URL.
-    # Существующий query сохраняем байт-в-байт: там могут быть подписанные параметры.
-    if "token" in base_query and "token" not in target_keys:
-        separator = "&" if query else ""
-        query = f"{query}{separator}token={quote_plus(base_query['token'])}"
-
-    return urlunsplit(
-        (
-            target_parts.scheme,
-            target_parts.netloc,
-            target_parts.path,
-            query,
-            target_parts.fragment,
-        )
-    )
-
-
-def _is_playlist(url: str, content_type: str, *, is_root: bool) -> bool:
-    if is_root:
-        return True
-    if ".m3u8" in urlsplit(url).path.lower():
-        return True
-    lowered = content_type.lower()
-    return "mpegurl" in lowered or "m3u8" in lowered
-
-
-def _safe_suffix(url: str) -> str:
-    suffix = PurePosixPath(urlsplit(url).path).suffix.lower()
-    if re.fullmatch(r"\.[a-z0-9]{1,8}", suffix or ""):
-        return suffix
-    return ".bin"
 
 
 def _safe_camera_ref(value: str) -> str:

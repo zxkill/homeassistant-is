@@ -136,8 +136,12 @@ def test_yard_stream_uses_local_proxy_and_hides_cdn_bearer(component_root):
     assert "async_setup_yard_hls_proxy" in init_source
     assert 'requires_auth = False' in proxy
     assert '?auth=' in proxy
-    assert '"token" in base_query' in proxy
+    utils = (component_root / "yard_hls_utils.py").read_text()
+    assert 'inherit_hls_token' in utils
+    assert 'resolve_hls_reference' in utils
+    assert 'Authorization' in utils
     assert "_rewrite_playlist" in proxy
+    assert "looks_like_playlist(prefix)" in proxy
     assert "MEDIA URL" not in proxy
 
 
