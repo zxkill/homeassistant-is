@@ -58,7 +58,7 @@ _LOGGER = logging.getLogger("custom_components.intersvyaz.config_flow")
 class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
     """Мастер подключения, reauth и reconfigure."""
 
-    VERSION = 3
+    VERSION = 4
 
     def __init__(self) -> None:
         self._phone_number: str | None = None

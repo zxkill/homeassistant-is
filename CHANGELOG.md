@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.0.7
+
+- Полностью удалены `opencv-python-headless` и `opencv-contrib-python-headless`. Причина: официальный Home Assistant Container/HA OS основан на Alpine/musl, а OpenCV публикует Linux wheels в формате manylinux/glibc; Home Assistant поэтому выбирал sdist и пытался собирать OpenCV внутри контейнера.
+- Новый portable recognition worker использует только Pillow (уже базовая зависимость Home Assistant) и `numpy==2.3.2`. Home Assistant отдельно фиксирует NumPy 2.3.2 в package constraints как musllinux-совместимый пакет.
+- Реализован lightweight face-like detector по консервативной skin/geometry маске без внешних моделей и без системных библиотек.
+- Новый 128-мерный `portable_face_v1` descriptor объединяет нормализованную яркость и карту градиентов и устойчив к зеркальному отражению камеры.
+- Порог нового движка по умолчанию снижен до `0.30`; для auto-open теперь по умолчанию требуется 3 последовательных совпадения.
+- Диапазон порога в UI синхронизирован с portable engine: `0.10..0.55`; старое значение вне диапазона больше не ломает форму настроек.
+- ConfigEntry schema поднята до v4: при переходе со старого dlib/OpenCV engine автоматическое открытие принудительно переводится в безопасный `observe`, пока пользователь заново не добавит лица и явно не включит auto-open.
+- Auto-open дополнительно блокируется, если portable worker считает найденный кандидат недостаточно надёжным; режим `observe` остаётся режимом по умолчанию.
+- Descriptors dlib/OpenCV намеренно не мигрируются в portable format: известных людей после обновления необходимо добавить заново.
+- Добавлены healthcheck и end-to-end smoke tests portable worker; regression-тест запрещает возврат OpenCV/dlib в manifest.
+
 ## 2.0.6
 
 - Исправлена установка OpenCV в Home Assistant 2026.8 / Python 3.14 на Linux: `opencv-python-headless==4.14.0.94` заменён на `opencv-contrib-python-headless==4.14.0.94`.

@@ -132,16 +132,19 @@ class IntersvyazOptionsFlow(OptionsFlow):
                 ),
                 vol.Required(
                     CONF_RECOGNITION_THRESHOLD,
-                    default=float(
+                    default=_bounded_float(
                         options.get(
                             CONF_RECOGNITION_THRESHOLD,
                             FACE_RECOGNITION_DISTANCE_THRESHOLD,
-                        )
+                        ),
+                        default=FACE_RECOGNITION_DISTANCE_THRESHOLD,
+                        minimum=0.10,
+                        maximum=0.55,
                     ),
                 ): selector.NumberSelector(
                     selector.NumberSelectorConfig(
-                        min=0.30,
-                        max=0.90,
+                        min=0.10,
+                        max=0.55,
                         step=0.01,
                         mode=selector.NumberSelectorMode.BOX,
                     )
@@ -380,3 +383,13 @@ class IntersvyazOptionsFlow(OptionsFlow):
         if not names:
             return "Пока не добавлено ни одного лица."
         return "\n".join(f"• {name}" for name in sorted(names))
+
+
+def _bounded_float(value: object, *, default: float, minimum: float, maximum: float) -> float:
+    """Normalize a persisted numeric option before feeding a NumberSelector."""
+
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError):
+        parsed = float(default)
+    return max(float(minimum), min(float(maximum), parsed))

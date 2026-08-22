@@ -23,7 +23,7 @@ from .const import (
     DEFAULT_RECOGNITION_MODE,
     DOOR_EVENT_FACE_RECOGNIZED,
     DOOR_EVENT_UNKNOWN_PERSON,
-    FACE_ENGINE_OPENCV_LBP_V1,
+    FACE_ENGINE_PORTABLE_V1,
     FACE_EVENT_COOLDOWN_SECONDS,
     FACE_RECOGNITION_COOLDOWN_SECONDS,
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
@@ -35,7 +35,7 @@ from .const import (
     RECOGNITION_MODES,
 )
 from .events import emit_door_event, face_payload
-from .recognition import OpenCvFaceRecognitionEngine, FaceRecognitionResult
+from .recognition import PortableFaceRecognitionEngine, FaceRecognitionResult
 from .runtime import IntersvyazConfigEntry
 from .security import safe_door_ref
 
@@ -48,7 +48,7 @@ class KnownFace:
 
     name: str
     encoding: list[float] = field(default_factory=list)
-    engine: str = FACE_ENGINE_OPENCV_LBP_V1
+    engine: str = FACE_ENGINE_PORTABLE_V1
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -72,11 +72,11 @@ class FaceRecognitionManager:
         hass: HomeAssistant,
         entry: IntersvyazConfigEntry,
         *,
-        engine: OpenCvFaceRecognitionEngine | None = None,
+        engine: PortableFaceRecognitionEngine | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
-        self._engine = engine or OpenCvFaceRecognitionEngine()
+        self._engine = engine or PortableFaceRecognitionEngine()
         self._known_faces: list[KnownFace] = []
         self._last_frame_hash: dict[str, bytes] = {}
         self._door_open_cooldown: dict[str, float] = {}
@@ -127,8 +127,8 @@ class FaceRecognitionManager:
         self._threshold = _clamp_float(
             options.get(CONF_RECOGNITION_THRESHOLD),
             default=FACE_RECOGNITION_DISTANCE_THRESHOLD,
-            minimum=0.30,
-            maximum=0.90,
+            minimum=0.10,
+            maximum=0.55,
         )
         self._required_matches = _clamp_int(
             options.get(CONF_RECOGNITION_REQUIRED_MATCHES),
@@ -300,6 +300,12 @@ class FaceRecognitionManager:
                 result.faces_detected,
             )
             return result
+        if not result.auto_open_safe:
+            _LOGGER.warning(
+                "Auto-open door=%s заблокирован portable-движком: кандидат недостаточно надёжен",
+                safe_door_ref(door_uid),
+            )
+            return result
         if not callable(open_callback):
             _LOGGER.warning(
                 "Auto-open door=%s невозможен: callback отсутствует",
@@ -373,12 +379,13 @@ class FaceRecognitionManager:
             engine = item.get(CONF_FACE_ENGINE)
             if not isinstance(name, str) or not isinstance(encoding, Iterable):
                 continue
-            if engine != FACE_ENGINE_OPENCV_LBP_V1:
+            if engine != FACE_ENGINE_PORTABLE_V1:
+                previous_engine = engine or "legacy_dlib"
                 _LOGGER.warning(
-                    "Лицо '%s' пропущено: descriptor создан старым движком (%s). "
-                    "После обновления до OpenCV его нужно добавить заново.",
+                    "Лицо '%s' пропущено: descriptor создан несовместимым движком (%s). "
+                    "После обновления до portable engine его нужно добавить заново.",
                     name.strip() or "<без имени>",
-                    engine or "legacy_dlib",
+                    previous_engine,
                 )
                 continue
             try:
@@ -387,7 +394,7 @@ class FaceRecognitionManager:
                 continue
             if name.strip() and len(vector) == 128:
                 self._known_faces.append(
-                    KnownFace(name.strip(), vector, FACE_ENGINE_OPENCV_LBP_V1)
+                    KnownFace(name.strip(), vector, FACE_ENGINE_PORTABLE_V1)
                 )
 
     async def _async_store_faces(self, *, ensure_safe_mode: bool = False) -> None:

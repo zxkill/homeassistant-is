@@ -30,6 +30,8 @@ from .const import (
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
     FACE_REQUIRED_MATCHES_DEFAULT,
     RECOGNITION_MODE_AUTO_OPEN,
+    RECOGNITION_MODE_OBSERVE,
+    RECOGNITION_MODES,
 )
 from .coordinator import IntersvyazDataUpdateCoordinator
 from .door_manager import DoorManager
@@ -138,38 +140,63 @@ async def async_unload_entry(
 
 
 async def async_migrate_entry(hass: HomeAssistant, entry: IntersvyazConfigEntry) -> bool:
-    """Migrate 1.x/2.0-beta config entry options to stable 2.0 schema."""
+    """Migrate legacy config entries to the portable recognition schema."""
 
+    target_version = 4
     _LOGGER.info(
-        "Миграция Intersvyaz entry_id=%s version=%s -> 3",
+        "[MIGRATION][BEGIN] entry_id=%s version=%s target=%s",
         entry.entry_id,
         entry.version,
+        target_version,
     )
-    if entry.version > 3:
-        _LOGGER.error("ConfigEntry создан более новой версией интеграции")
+    if entry.version > target_version:
+        _LOGGER.error(
+            "[MIGRATION][ABORT] entry_id=%s newer_version=%s target=%s",
+            entry.entry_id,
+            entry.version,
+            target_version,
+        )
         return False
-    if entry.version == 3:
+    if entry.version == target_version:
         return True
 
     options = dict(entry.options)
-    had_faces = bool(options.get(CONF_KNOWN_FACES))
-    # Старые версии открывали дверь после первого совпадения. Для уже существующей
-    # конфигурации сохраняем поведение. Новые установки 2.0 по умолчанию безопаснее:
-    # observe + два последовательных совпадения.
+    stored_faces = options.get(CONF_KNOWN_FACES, [])
+    legacy_face_count = len(stored_faces) if isinstance(stored_faces, list) else 0
+
+    # Portable 2.0.7 uses a different descriptor scale than dlib/OpenCV. Never
+    # carry an old auto-open decision policy into the new engine implicitly:
+    # old descriptors remain stored for rollback/diagnostics but are ignored by
+    # FaceRecognitionManager until the person is explicitly enrolled again.
+    previous_mode = str(options.get(CONF_RECOGNITION_MODE, DEFAULT_RECOGNITION_MODE))
+    if previous_mode not in RECOGNITION_MODES:
+        previous_mode = DEFAULT_RECOGNITION_MODE
+    if previous_mode == RECOGNITION_MODE_AUTO_OPEN:
+        options[CONF_RECOGNITION_MODE] = RECOGNITION_MODE_OBSERVE
+        _LOGGER.warning(
+            "[MIGRATION][AUTO_OPEN_DISABLED] entry_id=%s reason=recognition_engine_changed",
+            entry.entry_id,
+        )
+    else:
+        options[CONF_RECOGNITION_MODE] = previous_mode
+
+    options[CONF_RECOGNITION_THRESHOLD] = FACE_RECOGNITION_DISTANCE_THRESHOLD
+    options[CONF_RECOGNITION_REQUIRED_MATCHES] = FACE_REQUIRED_MATCHES_DEFAULT
     options.setdefault(
-        CONF_RECOGNITION_MODE,
-        RECOGNITION_MODE_AUTO_OPEN if had_faces else DEFAULT_RECOGNITION_MODE,
+        CONF_AUTO_OPEN_COOLDOWN_SECONDS, FACE_RECOGNITION_COOLDOWN_SECONDS
     )
-    options.setdefault(CONF_RECOGNITION_THRESHOLD, FACE_RECOGNITION_DISTANCE_THRESHOLD)
-    options.setdefault(CONF_RECOGNITION_REQUIRED_MATCHES, 1 if had_faces else FACE_REQUIRED_MATCHES_DEFAULT)
-    options.setdefault(CONF_AUTO_OPEN_COOLDOWN_SECONDS, FACE_RECOGNITION_COOLDOWN_SECONDS)
     options.setdefault(CONF_FACE_EVENT_COOLDOWN_SECONDS, FACE_EVENT_COOLDOWN_SECONDS)
 
-    hass.config_entries.async_update_entry(entry, options=options, version=3)
+    hass.config_entries.async_update_entry(
+        entry, options=options, version=target_version
+    )
     _LOGGER.info(
-        "Миграция завершена: legacy_faces=%s mode=%s required=%s",
-        had_faces,
+        "[MIGRATION][DONE] entry_id=%s legacy_faces=%s mode=%s threshold=%.2f required=%s",
+        entry.entry_id,
+        legacy_face_count,
         options[CONF_RECOGNITION_MODE],
+        options[CONF_RECOGNITION_THRESHOLD],
         options[CONF_RECOGNITION_REQUIRED_MATCHES],
     )
     return True
+

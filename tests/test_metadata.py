@@ -4,11 +4,12 @@ import json
 def test_manifest_is_stable_v2(component_root):
     manifest = json.loads((component_root / "manifest.json").read_text())
     assert manifest["domain"] == "intersvyaz"
-    assert manifest["version"] == "2.0.6"
+    assert manifest["version"] == "2.0.7"
     assert manifest["config_flow"] is True
     assert manifest["integration_type"] == "hub"
-    assert manifest["requirements"] == ["opencv-contrib-python-headless==4.14.0.94"]
-    assert not any(item.lower().startswith("numpy") for item in manifest["requirements"])
+    assert manifest["requirements"] == ["numpy==2.3.2"]
+    assert any(item.lower().startswith("numpy") for item in manifest["requirements"])
+    assert not any("opencv" in item.lower() for item in manifest["requirements"])
     assert not any("dlib" in item.lower() for item in manifest["requirements"])
     assert not any("face-recognition" in item.lower() for item in manifest["requirements"])
 

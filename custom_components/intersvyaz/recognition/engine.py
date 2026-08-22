@@ -1,9 +1,9 @@
-"""Изолированный локальный движок распознавания лиц Intersvyaz.
+"""Изолированный переносимый движок распознавания лиц Intersvyaz.
 
-Нативный OpenCV намеренно НЕ импортируется в процессе Home Assistant.
-Он запускается в отдельном worker-процессе. Поэтому даже если бинарный wheel
-оказался несовместим с конкретным CPU и завершился SIGILL/SIGSEGV/SIGBUS,
-падает только worker, а Home Assistant продолжает работать.
+Home Assistant не импортирует вычислительные зависимости движка напрямую:
+Pillow/NumPy работают в отдельном worker-процессе. Начиная с 2.0.7 OpenCV и
+dlib полностью удалены, чтобы интеграция одинаково устанавливалась в
+официальных Alpine/musl контейнерах Home Assistant и в HA OS.
 """
 from __future__ import annotations
 
@@ -39,6 +39,7 @@ class FaceRecognitionResult:
     faces_detected: int
     matched_name: str | None = None
     distance: float | None = None
+    auto_open_safe: bool = False
 
     @property
     def matched(self) -> bool:
@@ -47,10 +48,10 @@ class FaceRecognitionResult:
         return self.matched_name is not None
 
 
-class OpenCvFaceRecognitionEngine:
-    """Клиент изолированного OpenCV worker-процесса."""
+class PortableFaceRecognitionEngine:
+    """Клиент изолированного portable worker-процесса."""
 
-    engine_id = "opencv_lbp_v1"
+    engine_id = "portable_face_v1"
 
     def __init__(self, *, timeout_seconds: float = _WORKER_TIMEOUT_SECONDS) -> None:
         self._timeout_seconds = max(float(timeout_seconds), 5.0)
@@ -63,15 +64,15 @@ class OpenCvFaceRecognitionEngine:
     def available(self) -> bool:
         """Можно ли попытаться запустить локальное распознавание.
 
-        Проверка намеренно не импортирует cv2/numpy. Сам импорт происходит только
-        в дочернем процессе, чтобы native wheel не мог уронить Home Assistant.
+        Проверка намеренно не импортирует Pillow/NumPy. NumPy загружается только
+        в дочернем процессе; Pillow уже является базовой зависимостью Home Assistant.
         """
 
         if self._fatal_error is not None:
             return False
         return all(
             importlib.util.find_spec(module_name) is not None
-            for module_name in ("cv2", "numpy")
+            for module_name in ("PIL", "numpy")
         )
 
     @property
@@ -81,7 +82,7 @@ class OpenCvFaceRecognitionEngine:
         return self._fatal_error
 
     def extract_single_encoding(self, image_bytes: bytes) -> list[float]:
-        """Получить 128-мерный локальный LBP descriptor ровно одного лица."""
+        """Получить 128-мерный переносимый descriptor ровно одного лица."""
 
         if not image_bytes:
             raise HomeAssistantError("Пустое изображение невозможно обработать")
@@ -146,6 +147,7 @@ class OpenCvFaceRecognitionEngine:
             faces_detected=max(faces_detected, 0),
             matched_name=matched_name,
             distance=distance,
+            auto_open_safe=bool(response.get("auto_open_safe", False)),
         )
 
     def close(self) -> None:
@@ -162,7 +164,7 @@ class OpenCvFaceRecognitionEngine:
                 raise HomeAssistantError(self._fatal_error)
             if not self.available:
                 raise HomeAssistantError(
-                    "Зависимости локального распознавания лиц не установлены"
+                    "Portable-зависимости распознавания лиц недоступны (Pillow/NumPy)"
                 )
 
             process = self._ensure_worker_locked()
@@ -274,7 +276,7 @@ class OpenCvFaceRecognitionEngine:
             return response
 
     def _ensure_worker_locked(self) -> subprocess.Popen[str]:
-        """Запустить worker, не импортируя native-библиотеки в Home Assistant."""
+        """Запустить worker, не импортируя вычислительные библиотеки в Home Assistant."""
 
         process = self._process
         if process is not None and process.poll() is None:
@@ -412,7 +414,11 @@ class OpenCvFaceRecognitionEngine:
             self._fatal_error = f"Recognition worker остановлен: {reason}"
 
 
+# Совместимость с ранними 2.0.x и сторонними тестами.
+OpenCvFaceRecognitionEngine = PortableFaceRecognitionEngine
+
 __all__ = [
     "FaceRecognitionResult",
+    "PortableFaceRecognitionEngine",
     "OpenCvFaceRecognitionEngine",
 ]
