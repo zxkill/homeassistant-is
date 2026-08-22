@@ -1,0 +1,59 @@
+# Changelog
+
+## 2.0.0
+
+Крупное архитектурное обновление самостоятельной Home Assistant интеграции.
+
+### Home Assistant
+- Минимальная поддерживаемая версия: Home Assistant 2026.8.
+- Runtime переведён на типизированный `ConfigEntry.runtime_data` вместо большого `hass.data`.
+- Добавлены штатные re-auth и reconfigure flows.
+- Удалён config-entry update listener, чтобы не конфликтовать с reload helpers новых Home Assistant.
+- Каждый физический домофон теперь представлен отдельным HA Device; аккаунт остаётся hub/service device.
+- Добавлена EventEntity для каждого домофона.
+- Добавлена безопасная диагностика.
+
+### Домофоны и камеры
+- Новый `DoorManager` отвечает за обнаружение, fallback, обновление временных ссылок и открытие.
+- Основные и расшаренные домофоны по-прежнему объединяются с дедупликацией.
+- При изменении состава домофонов entry автоматически перезагружается для актуализации сущностей.
+- Новый единый `DoorSnapshotManager` исключает лишние параллельные загрузки одного кадра.
+- Камера при протухшей ссылке выполняет одно обновление данных домофона и повторяет запрос.
+
+### Распознавание лиц
+- Убрана зависимость от вручную устанавливаемого `face_recognition`.
+- Используется локальный `dlib-bin==20.0.1` + `face-recognition-models==0.3.0`, объявленные в manifest requirements.
+- Сохранена совместимость со старыми 128-мерными dlib descriptors.
+- Добавлены режимы `off`, `observe`, `auto_open`.
+- Новые установки используют `observe` и два последовательных совпадения.
+- Для legacy-entry с уже существующими лицами миграция сохраняет прежнее auto-open поведение и одно совпадение.
+- Добавлены настраиваемые threshold, required matches, auto-open cooldown и event cooldown.
+- Идентичные кадры дедуплицируются по hash.
+- `unknown_person` теперь подчиняется event cooldown и не спамит событием на каждом новом кадре.
+- Автооткрытие блокируется, если на подтверждающем кадре обнаружено не ровно одно лицо.
+- Ошибка физического открытия больше не ломает выдачу camera snapshot/фоновый цикл распознавания.
+
+### События
+- Добавлены event types: `face_recognized`, `unknown_person`, `door_opened`, `door_open_failed`.
+- Сохранены удобные event-bus события: `intersvyaz_face_recognized`, `intersvyaz_unknown_person`, `intersvyaz_door_opened`, `intersvyaz_door_open_failed`.
+- Добавлен сенсор «Последний посетитель».
+- Исправлен сценарий из issue #17: больше не нужно вручную редактировать Python-код, чтобы строить уведомления по распознаванию.
+
+### API и безопасность
+- Исправлена ошибка, при которой отсутствующий `TOKEN` мог превращаться в строку `"None"` и считаться валидным.
+- Выделены `IntersvyazAuthError` и `IntersvyazNetworkError`.
+- HTTP 401/403 теперь корректно запускают re-auth.
+- Credentials больше не попадают в coordinator data.
+- Добавлен единый рекурсивный sanitizer для request context, диагностики и ошибок.
+- Runtime UID домофона (в legacy-формате он содержит MAC) не выводится в лог: используется короткая hash-ссылка.
+- Debug-summary ответов API больше не печатает значения неизвестных полей, только ключи/размер структуры.
+- Убрано намеренное логирование сырых token/config payload.
+
+### Код и поддержка
+- Большая часть runtime/service/recognition логики вынесена из `__init__.py` в небольшие модули.
+- Options flow отделён от config flow.
+- Services/actions вынесены в отдельный модуль и регистрируются в `async_setup`, независимо от состояния ConfigEntry.
+- Ошибки неправильного использования actions переведены на `ServiceValidationError` с переводимыми сообщениями.
+- Entity names переведены на Home Assistant translation keys (RU/EN).
+- README полностью обновлён: HACS-кнопка, установка, deployment types, recognition, events, re-auth, diagnostics и troubleshooting.
+- Добавлен CI с compile/tests, HACS validation и hassfest.

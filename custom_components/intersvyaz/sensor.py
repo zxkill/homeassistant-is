@@ -1,181 +1,207 @@
-"""Сенсоры интеграции Intersvyaz."""
+"""Sensor entities аккаунта и домофонов Intersvyaz."""
 from __future__ import annotations
 
-import logging
 from typing import Any
 
-from homeassistant import const as ha_const
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
-from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
+from homeassistant.const import EntityCategory, UnitOfCurrency
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DATA_COORDINATOR, DATA_CONFIG, DOMAIN
-
-_LOGGER = logging.getLogger(f"{DOMAIN}.sensor")
-
-
-def _resolve_balance_unit() -> Any:
-    """Определить единицу измерения баланса с учетом версии Home Assistant."""
-
-    # В новых релизах Home Assistant денежные единицы представлены перечислением
-    # UnitOfCurrency. Мы используем его при наличии, чтобы сохранить типобезопасность
-    # и корректное отображение в интерфейсе.
-    if hasattr(ha_const, "UnitOfCurrency"):
-        ruble_unit = ha_const.UnitOfCurrency.RUBLE
-        _LOGGER.debug(
-            "Используем перечисление UnitOfCurrency.RUBLE для отображения баланса",
-        )
-        return ruble_unit
-
-    # Старые релизы предоставляют строковую константу CURRENCY_RUB. Если её нет,
-    # подставляем код RUB, чтобы не допустить падение интеграции и сохранить
-    # читабельный вывод в интерфейсе.
-    legacy_unit = getattr(ha_const, "CURRENCY_RUB", "RUB")
-    _LOGGER.debug(
-        "Используем строковую единицу измерения %s из homeassistant.const",
-        legacy_unit,
-    )
-    return legacy_unit
-
-
-# Фиксируем выбранную единицу измерения один раз при импортировании модуля, чтобы
-# сенсоры не выполняли повторных проверок и логов при каждом обновлении.
-BALANCE_UNIT = _resolve_balance_unit()
+from .const import (
+    DOOR_EVENT_FACE_RECOGNIZED,
+    DOOR_EVENT_UNKNOWN_PERSON,
+    SIGNAL_DOOR_EVENT,
+)
+from .devices import account_device_info, door_device_info
+from .models import DoorRuntime
+from .runtime import IntersvyazConfigEntry
 
 
 async def async_setup_entry(
-    hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
+    hass: HomeAssistant,
+    entry: IntersvyazConfigEntry,
+    async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Создать сенсоры после настройки конфигурации."""
-
-    entry_data = hass.data[DOMAIN][entry.entry_id]
-    coordinator = entry_data[DATA_COORDINATOR]
-
-    sensors: list[SensorEntity] = [
+    coordinator = entry.runtime_data.coordinator
+    entities: list[SensorEntity] = [
         IntersvyazBalanceSensor(coordinator, entry),
         IntersvyazProfileSensor(coordinator, entry),
     ]
-    _LOGGER.debug(
-        "Добавляем %d сенсора для записи %s: %s",
-        len(sensors),
-        entry.entry_id,
-        [sensor.__class__.__name__ for sensor in sensors],
-    )
-    async_add_entities(sensors, update_before_add=True)
+    for door in entry.runtime_data.doors:
+        entities.append(IntersvyazDoorStatusSensor(entry, door))
+        entities.append(IntersvyazLastVisitorSensor(entry, door))
+    async_add_entities(entities)
 
 
-class IntersvyazBaseSensor(CoordinatorEntity, SensorEntity):
-    """Базовый класс с общими удобствами."""
+class _AccountSensor(CoordinatorEntity, SensorEntity):
+    _attr_has_entity_name = True
 
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+    def __init__(self, coordinator, entry: IntersvyazConfigEntry) -> None:
         super().__init__(coordinator)
         self._entry = entry
-        self._attr_has_entity_name = True
-        self._attr_device_info = self._build_device_info()
-
-    def _build_device_info(self) -> DeviceInfo:
-        """Создать объект DeviceInfo для группировки сущностей."""
-
-        entry_data = self.coordinator.data or {}
-        user = entry_data.get("user", {})
-        identifier = (DOMAIN, self._entry.entry_id)
-        manufacturer = user.get("firm", {}).get("NAME", "АО \"Интерсвязь\"")
-        model = user.get("roleName", "Профиль абонента")
-        return DeviceInfo(
-            identifiers={identifier},
-            name=user.get("profileName") or user.get("FULL_NAME") or "Интерсвязь",
-            manufacturer=manufacturer,
-            model=model,
-            entry_type=DeviceEntryType.SERVICE,
-        )
-
-    @property
-    def extra_state_attributes(self) -> dict[str, Any]:
-        """Вернуть дополнительные атрибуты по умолчанию."""
-
-        return {}
+        self._attr_device_info = account_device_info(entry.entry_id)
 
 
-class IntersvyazBalanceSensor(IntersvyazBaseSensor):
-    """Сенсор, отображающий баланс договора."""
+class IntersvyazBalanceSensor(_AccountSensor):
+    """Баланс договора."""
 
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+    _attr_translation_key = "balance"
+    _attr_device_class = SensorDeviceClass.MONETARY
+    _attr_native_unit_of_measurement = UnitOfCurrency.RUBLE
+
+    def __init__(self, coordinator, entry: IntersvyazConfigEntry) -> None:
         super().__init__(coordinator, entry)
-        self._attr_name = "Баланс"
         self._attr_unique_id = f"{entry.entry_id}_balance"
-        self._attr_device_class = SensorDeviceClass.MONETARY
-        # Home Assistant запрещает сочетать денежный класс с state_class
-        # "measurement", поэтому явно обнуляем state_class. Так мы избегаем
-        # предупреждений регистратора и подчеркиваем, что значение баланса
-        # может как уменьшаться, так и увеличиваться.
-        self._attr_state_class = None
-        # Используем ранее вычисленную единицу измерения, чтобы корректно
-        # отображать валюту в UI независимо от версии Home Assistant.
-        self._attr_native_unit_of_measurement = BALANCE_UNIT
 
     @property
     def native_value(self) -> float | None:
-        """Вернуть текущий баланс в виде числа."""
-
-        balance_payload = (self.coordinator.data or {}).get("balance", {})
-        balance_raw = balance_payload.get("balance")
-        if balance_raw is None:
-            return None
+        payload = (self.coordinator.data or {}).get("balance", {})
+        value = payload.get("balance") if isinstance(payload, dict) else None
         try:
-            return float(balance_raw)
+            return float(value) if value is not None else None
         except (TypeError, ValueError):
-            _LOGGER.debug("Не удалось преобразовать баланс %s к числу", balance_raw)
             return None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Вернуть дополнительные атрибуты, включая блокировки."""
-
-        balance_payload = (self.coordinator.data or {}).get("balance", {})
-        blocked = balance_payload.get("blocked") or {}
-        attributes: dict[str, Any] = {
-            "debt": balance_payload.get("debt"),
-            "next_payment": balance_payload.get("nextPayment"),
+        payload = (self.coordinator.data or {}).get("balance", {})
+        if not isinstance(payload, dict):
+            return {}
+        blocked = payload.get("blocked")
+        if not isinstance(blocked, dict):
+            blocked = {}
+        return {
+            "debt": payload.get("debt"),
+            "next_payment": payload.get("nextPayment"),
             "lock_text": blocked.get("text"),
             "lock_pay": blocked.get("pay"),
         }
-        return attributes
 
 
-class IntersvyazProfileSensor(IntersvyazBaseSensor):
-    """Сенсор, отображающий основные данные профиля."""
+class IntersvyazProfileSensor(_AccountSensor):
+    """Краткий профиль абонента без credentials."""
 
-    def __init__(self, coordinator, entry: ConfigEntry) -> None:
+    _attr_translation_key = "profile"
+
+    def __init__(self, coordinator, entry: IntersvyazConfigEntry) -> None:
         super().__init__(coordinator, entry)
-        self._attr_name = "Профиль"
         self._attr_unique_id = f"{entry.entry_id}_profile"
 
     @property
     def native_value(self) -> str | None:
-        """Вернуть краткое имя профиля."""
-
-        user_payload = (self.coordinator.data or {}).get("user", {})
-        return (
-            user_payload.get("profileName")
-            or user_payload.get("shortFio")
-            or user_payload.get("FULL_NAME")
-        )
+        payload = (self.coordinator.data or {}).get("user", {})
+        if not isinstance(payload, dict):
+            return None
+        return payload.get("profileName") or payload.get("shortFio") or payload.get("FULL_NAME")
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
-        """Вернуть расширенные атрибуты профиля."""
-
-        data = self.coordinator.data or {}
-        user_payload = data.get("user", {})
-        config = self.hass.data[DOMAIN][self._entry.entry_id][DATA_CONFIG]
-        attributes: dict[str, Any] = {
-            "login": user_payload.get("LOGIN"),
-            "account": user_payload.get("ACCOUNT_NUM"),
-            "phone": user_payload.get("PHONE") or config.get("phone_number"),
-            "role": user_payload.get("roleName"),
-            "services": user_payload.get("uslugaList"),
+        payload = (self.coordinator.data or {}).get("user", {})
+        if not isinstance(payload, dict):
+            return {}
+        # Телефон намеренно не дублируется в state attributes.
+        return {
+            "account": payload.get("ACCOUNT_NUM"),
+            "role": payload.get("roleName"),
+            "services": payload.get("uslugaList"),
         }
-        return attributes
+
+
+class IntersvyazDoorStatusSensor(SensorEntity):
+    """Статус, который провайдер сообщает для конкретного домофона."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "door_status"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(self, entry: IntersvyazConfigEntry, door: DoorRuntime) -> None:
+        self._entry = entry
+        self._door_uid = door.uid
+        self._attr_unique_id = f"{door.uid}_status"
+        self._attr_device_info = door_device_info(entry.entry_id, door)
+
+    @property
+    def native_value(self) -> str | None:
+        door = self._entry.runtime_data.door_manager.get(self._door_uid)
+        if door is None:
+            return None
+        return door.status_text or door.status_code or "Доступен"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        door = self._entry.runtime_data.door_manager.get(self._door_uid)
+        if door is None:
+            return {}
+        return {
+            "is_main": door.is_main,
+            "is_shared": door.is_shared,
+            "has_video": door.has_video,
+            "status_code": door.status_code,
+        }
+
+
+class IntersvyazLastVisitorSensor(SensorEntity):
+    """Последний распознанный/неизвестный посетитель домофона."""
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "last_visitor"
+    _attr_icon = "mdi:account-eye"
+
+    def __init__(self, entry: IntersvyazConfigEntry, door: DoorRuntime) -> None:
+        self._entry = entry
+        self._door_uid = door.uid
+        self._attr_unique_id = f"{door.uid}_last_visitor"
+        self._attr_device_info = door_device_info(entry.entry_id, door)
+        self._attr_native_value: str | None = None
+        self._event_attributes: dict[str, Any] = {}
+
+    async def async_added_to_hass(self) -> None:
+        last = self._entry.runtime_data.last_visitors.get(self._door_uid)
+        if last:
+            self._apply_payload(last.get("event_type"), last)
+        self.async_on_remove(
+            async_dispatcher_connect(
+                self.hass,
+                f"{SIGNAL_DOOR_EVENT}_{self._entry.entry_id}",
+                self._async_handle_event,
+            )
+        )
+
+    @callback
+    def _async_handle_event(
+        self,
+        door_uid: str,
+        event_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if door_uid != self._door_uid:
+            return
+        if event_type not in (DOOR_EVENT_FACE_RECOGNIZED, DOOR_EVENT_UNKNOWN_PERSON):
+            return
+        self._apply_payload(event_type, payload)
+        self.async_write_ha_state()
+
+    def _apply_payload(self, event_type: str | None, payload: dict[str, Any]) -> None:
+        if event_type == DOOR_EVENT_FACE_RECOGNIZED:
+            self._attr_native_value = str(payload.get("person") or "Известный")
+        elif event_type == DOOR_EVENT_UNKNOWN_PERSON:
+            self._attr_native_value = "Неизвестный"
+        self._event_attributes = {
+            key: payload.get(key)
+            for key in (
+                "distance",
+                "match_score",
+                "faces_detected",
+                "confirmed",
+                "streak",
+                "required_matches",
+            )
+            if key in payload
+        }
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        return dict(self._event_attributes)

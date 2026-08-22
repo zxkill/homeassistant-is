@@ -2,81 +2,263 @@
   "config": {
     "step": {
       "user": {
-        "title": "Авторизация Intersvyaz",
-        "description": "Введите номер телефона, чтобы получить инструкции по подтверждению.",
+        "title": "Подключение Интерсвязи",
+        "description": "Введите номер телефона, привязанный к услугам Интерсвязи.",
         "data": {
           "phone_number": "Номер телефона"
+        },
+        "data_description": {
+          "phone_number": "Номер телефона, привязанный к договору Интерсвязи."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Повторная авторизация",
+        "description": "Срок действия учётных данных истёк. Нажмите «Отправить», чтобы получить новый код подтверждения."
+      },
+      "reconfigure": {
+        "title": "Перенастройка Интерсвязи",
+        "description": "Повторно пройдите авторизацию и выбор договора без удаления интеграции.",
+        "data": {
+          "phone_number": "Номер телефона"
+        },
+        "data_description": {
+          "phone_number": "Номер телефона аккаунта, который нужно повторно авторизовать."
         }
       },
       "sms_code": {
         "title": "Подтверждение входа",
-        "description": "{auth_message}",
+        "description": "{auth_message}\n{error_message}",
         "data": {
           "sms_code": "Код подтверждения"
+        },
+        "data_description": {
+          "sms_code": "Код, полученный способом, указанным Интерсвязью."
         }
       },
       "select_account": {
         "title": "Выбор договора",
-        "description": "Выберите адрес, привязанный к аккаунту.\n{addresses}\n{error_message}",
+        "description": "Выберите договор.\n{addresses}\n{error_message}",
         "data": {
           "user_id": "Договор"
+        },
+        "data_description": {
+          "user_id": "Договор/адрес, домофонами которого будет управлять эта запись."
         }
       }
     },
     "error": {
-      "phone_submission_failed": "Не удалось отправить номер телефона. Проверьте данные и повторите попытку.",
-      "code_confirmation_failed": "Введённый код отклонён сервером. Попробуйте снова.",
-      "no_addresses": "Для указанного номера не найдено договоров.",
-      "token_request_failed": "Не удалось получить токен авторизации. Попробуйте снова.",
-      "crm_auth_failed": "Не удалось выполнить авторизацию во второй системе.",
-      "relay_fetch_failed": "Не удалось получить список домофонов. Повторите попытку позже.",
-      "relay_not_found": "Для выбранного договора не удалось найти доступные домофоны.",
-      "relay_data_invalid": "Сервер вернул некорректные данные домофона. Попробуйте выбрать другой адрес."
+      "invalid_phone": "Введите корректный номер телефона.",
+      "phone_submission_failed": "Не удалось запросить подтверждение. Проверьте журнал и повторите попытку.",
+      "code_confirmation_failed": "Код подтверждения не принят.",
+      "no_addresses": "Для номера не найдено доступных договоров."
+    },
+    "abort": {
+      "already_configured": "Этот аккаунт уже настроен.",
+      "auth_context_lost": "Контекст авторизации потерян. Запустите настройку заново.",
+      "wrong_account": "Во время повторной настройки был выбран другой аккаунт.",
+      "reauth_missing_phone": "В старой записи отсутствует номер телефона. Выполните перенастройку интеграции.",
+      "relay_fetch_failed": "Не удалось получить список домофонов.",
+      "relay_not_found": "Для договора не найдено доступных домофонов.",
+      "relay_data_invalid": "API вернуло неполные данные основного домофона.",
+      "crm_auth_failed": "Не удалось выполнить авторизацию системы открытия двери.",
+      "reauth_successful": "Повторная авторизация успешно завершена.",
+      "reconfigure_successful": "Интеграция успешно перенастроена."
     }
-  }
-  ,
+  },
   "options": {
     "step": {
       "init": {
-        "title": "Распознавание лиц",
-        "description": "Текущий список лиц:\n{known_faces}\n{error_message}",
+        "title": "Настройки Intersvyaz",
+        "description": "Режим распознавания: {recognition_mode}\n\nИзвестные лица:\n{known_faces}\n{error_message}",
         "menu": {
           "options": {
+            "recognition_settings": "Распознавание и автооткрытие",
             "add_face": "Добавить лицо",
             "remove_face": "Удалить лицо",
-            "background_cameras": "Фоновая обработка камер"
+            "background_cameras": "Камеры фонового анализа"
           }
         }
       },
-      "add_face": {
-        "title": "Добавление нового лица",
-        "description": "Загрузите фотографию гостя и укажите имя.\n{known_faces}\n{error_message}",
+      "recognition_settings": {
+        "title": "Распознавание и автооткрытие",
+        "description": "Режим «Только распознавать» создаёт события, но никогда сам не открывает дверь. Автооткрытие включайте только осознанно.",
         "data": {
-          "face_name": "Имя гостя",
-          "face_image": "Фотография лица"
+          "recognition_mode": "Режим",
+          "recognition_threshold": "Порог расстояния (меньше — строже)",
+          "recognition_required_matches": "Последовательных совпадений для подтверждения",
+          "auto_open_cooldown_seconds": "Пауза между автооткрытиями, секунд",
+          "face_event_cooldown_seconds": "Пауза между одинаковыми событиями, секунд"
+        },
+        "data_description": {
+          "recognition_mode": "Определяет, отключено ли распознавание, только создаёт события или может автоматически открыть дверь.",
+          "recognition_threshold": "Dlib distance: меньшее значение означает более строгое совпадение.",
+          "recognition_required_matches": "Сколько последовательных кадров должны распознать одного человека до подтверждения.",
+          "auto_open_cooldown_seconds": "Минимальная пауза между автоматическими открытиями одного домофона.",
+          "face_event_cooldown_seconds": "Защита от повторных одинаковых событий распознавания."
+        }
+      },
+      "add_face": {
+        "title": "Добавить лицо",
+        "description": "Лучше использовать фронтальную фотографию одного человека без других лиц.\n\nТекущие лица:\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Имя",
+          "face_image": "Фотография"
+        },
+        "data_description": {
+          "face_name": "Имя, которое будет показано в событиях и сенсоре последнего посетителя.",
+          "face_image": "JPG/PNG с одним хорошо видимым лицом."
         }
       },
       "remove_face": {
-        "title": "Удаление лица",
-        "description": "Выберите гостя, которого нужно удалить.\n{known_faces}\n{error_message}",
+        "title": "Удалить лицо",
+        "description": "Текущие лица:\n{known_faces}\n{error_message}",
         "data": {
-          "face_name": "Имя гостя"
+          "face_name": "Имя"
+        },
+        "data_description": {
+          "face_name": "Лицо и сохранённый биометрический descriptor будут удалены из текущей конфигурации."
         }
       },
       "background_cameras": {
-        "title": "Фоновая обработка камер",
-        "description": "Выберите домофоны, которые будут анализироваться в фоне.\n{available_doors}\n{error_message}",
+        "title": "Камеры фонового анализа",
+        "description": "Выберите домофоны, снимки которых будут анализироваться даже когда карточка камеры закрыта.\n{available_doors}",
         "data": {
-          "background_cameras": "Домофоны для фонового анализа"
+          "background_cameras": "Домофоны"
+        },
+        "data_description": {
+          "background_cameras": "Камеры, которые интеграция будет анализировать в фоне."
         }
       }
     },
     "error": {
-      "library_missing": "Библиотека face_recognition не установлена на сервере Home Assistant.",
-      "invalid_name": "Введите корректное имя гостя.",
-      "invalid_image": "Не удалось прочитать изображение. Попробуйте другой файл.",
-      "add_failed": "Не получилось сохранить лицо. Проверьте журнал ошибок.",
-      "remove_failed": "Не удалось удалить лицо. Проверьте журнал ошибок."
+      "add_failed": "Не удалось добавить лицо. Подробности есть в журнале Home Assistant.",
+      "remove_failed": "Не удалось удалить лицо. Подробности есть в журнале Home Assistant."
+    }
+  },
+  "entity": {
+    "button": {
+      "open_door": {
+        "name": "Открыть дверь"
+      }
+    },
+    "camera": {
+      "door_camera": {
+        "name": "Камера"
+      }
+    },
+    "event": {
+      "door_event": {
+        "name": "Событие",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "face_recognized": "Лицо распознано",
+              "unknown_person": "Неизвестный посетитель",
+              "door_opened": "Дверь открыта",
+              "door_open_failed": "Ошибка открытия двери"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "balance": {
+        "name": "Баланс"
+      },
+      "profile": {
+        "name": "Профиль"
+      },
+      "door_status": {
+        "name": "Состояние"
+      },
+      "last_visitor": {
+        "name": "Последний посетитель"
+      }
+    }
+  },
+  "exceptions": {
+    "entry_not_found": {
+      "message": "Выбранная запись Intersvyaz не найдена."
+    },
+    "entry_not_loaded": {
+      "message": "Выбранная запись Intersvyaz сейчас не загружена."
+    },
+    "runtime_not_ready": {
+      "message": "Запись Intersvyaz ещё запускается."
+    },
+    "door_not_found": {
+      "message": "Выбранный домофон не найден или его нельзя открыть."
+    },
+    "mixed_face_payload": {
+      "message": "Не смешивайте faces с полями одиночного добавления."
+    },
+    "faces_must_be_list": {
+      "message": "Поле faces должно быть списком."
+    },
+    "face_item_invalid": {
+      "message": "Каждый элемент faces должен быть объектом."
+    },
+    "face_name_required": {
+      "message": "Для каждого лица обязательно имя."
+    },
+    "face_source_required": {
+      "message": "Для каждого лица нужен ровно один источник image_url или image_base64."
+    },
+    "invalid_image_url": {
+      "message": "image_url должен быть абсолютным HTTP- или HTTPS-адресом."
+    }
+  },
+  "services": {
+    "open_door": {
+      "name": "Открыть домофон",
+      "description": "Открывает выбранный домофон Интерсвязи; без door_uid используется основной.",
+      "fields": {
+        "entry_id": {
+          "name": "Аккаунт Интерсвязи",
+          "description": "Запись интеграции, которой принадлежит домофон."
+        },
+        "door_uid": {
+          "name": "Домофон",
+          "description": "Внутренний UID конкретного домофона; оставьте пустым для основного."
+        }
+      }
+    },
+    "add_known_face": {
+      "name": "Добавить известное лицо",
+      "description": "Добавляет одно или несколько лиц в локальную базу распознавания.",
+      "fields": {
+        "entry_id": {
+          "name": "Аккаунт Интерсвязи"
+        },
+        "name": {
+          "name": "Имя",
+          "description": "Имя при одиночном добавлении."
+        },
+        "image_url": {
+          "name": "URL фотографии",
+          "description": "Абсолютный HTTP/HTTPS URL изображения."
+        },
+        "image_base64": {
+          "name": "Фотография в base64",
+          "description": "Альтернатива image_url."
+        },
+        "faces": {
+          "name": "Несколько лиц",
+          "description": "Список объектов name + ровно один image_url/image_base64."
+        }
+      }
+    },
+    "remove_known_face": {
+      "name": "Удалить известное лицо",
+      "description": "Удаляет лицо из локальной базы распознавания.",
+      "fields": {
+        "entry_id": {
+          "name": "Аккаунт Интерсвязи"
+        },
+        "name": {
+          "name": "Имя"
+        }
+      }
     }
   }
 }

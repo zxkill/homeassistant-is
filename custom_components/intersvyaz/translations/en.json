@@ -2,81 +2,263 @@
   "config": {
     "step": {
       "user": {
-        "title": "Intersvyaz authorization",
-        "description": "Enter the phone number to receive confirmation instructions.",
+        "title": "Connect Intersvyaz",
+        "description": "Enter the phone number linked to your Intersvyaz services.",
         "data": {
           "phone_number": "Phone number"
+        },
+        "data_description": {
+          "phone_number": "Phone number linked to the Intersvyaz contract."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Re-authentication",
+        "description": "Stored credentials have expired. Submit the form to request a new confirmation code."
+      },
+      "reconfigure": {
+        "title": "Reconfigure Intersvyaz",
+        "description": "Repeat authorization and contract selection without removing the integration.",
+        "data": {
+          "phone_number": "Phone number"
+        },
+        "data_description": {
+          "phone_number": "Phone number of the account to authorize again."
         }
       },
       "sms_code": {
-        "title": "Verification",
-        "description": "{auth_message}",
+        "title": "Confirm sign-in",
+        "description": "{auth_message}\n{error_message}",
         "data": {
           "sms_code": "Confirmation code"
+        },
+        "data_description": {
+          "sms_code": "Code received using the confirmation method shown by Intersvyaz."
         }
       },
       "select_account": {
         "title": "Select contract",
-        "description": "Choose the address linked to your account.\n{addresses}\n{error_message}",
+        "description": "Select a contract.\n{addresses}\n{error_message}",
         "data": {
           "user_id": "Contract"
+        },
+        "data_description": {
+          "user_id": "Contract/address whose intercoms will be managed by this entry."
         }
       }
     },
     "error": {
-      "phone_submission_failed": "Failed to send the phone number. Please check the data and try again.",
-      "code_confirmation_failed": "The entered code was rejected. Please try again.",
-      "no_addresses": "No contracts were found for the specified phone number.",
-      "token_request_failed": "Failed to obtain an access token. Please try again.",
-      "crm_auth_failed": "Failed to authorize in the secondary system.",
-      "relay_fetch_failed": "Failed to fetch the available doorphones. Please try again later.",
-      "relay_not_found": "No controllable doorphones were found for the selected contract.",
-      "relay_data_invalid": "The server returned invalid doorphone data. Try selecting another address."
+      "invalid_phone": "Enter a valid phone number.",
+      "phone_submission_failed": "Could not request confirmation.",
+      "code_confirmation_failed": "The confirmation code was rejected.",
+      "no_addresses": "No contracts were found for this phone number."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "auth_context_lost": "Authorization context was lost. Start again.",
+      "wrong_account": "A different account was selected during reconfiguration.",
+      "reauth_missing_phone": "The legacy entry has no phone number. Use reconfigure instead.",
+      "relay_fetch_failed": "Could not load intercoms.",
+      "relay_not_found": "No intercoms were found for this contract.",
+      "relay_data_invalid": "The API returned incomplete intercom data.",
+      "crm_auth_failed": "Could not authorize the door-opening API.",
+      "reauth_successful": "Re-authentication completed successfully.",
+      "reconfigure_successful": "Reconfiguration completed successfully."
     }
-  }
-  ,
+  },
   "options": {
     "step": {
       "init": {
-        "title": "Face recognition",
-        "description": "Known faces list:\n{known_faces}\n{error_message}",
+        "title": "Intersvyaz settings",
+        "description": "Recognition mode: {recognition_mode}\n\nKnown faces:\n{known_faces}\n{error_message}",
         "menu": {
           "options": {
+            "recognition_settings": "Recognition and auto-open",
             "add_face": "Add face",
             "remove_face": "Remove face",
-            "background_cameras": "Background camera processing"
+            "background_cameras": "Background analysis cameras"
           }
         }
       },
-      "add_face": {
-        "title": "Add a new face",
-        "description": "Upload a guest photo and specify the name.\n{known_faces}\n{error_message}",
+      "recognition_settings": {
+        "title": "Recognition and auto-open",
+        "description": "Observe mode emits events but never opens the door automatically. Enable auto-open only when you understand the security implications.",
         "data": {
-          "face_name": "Guest name",
-          "face_image": "Face photo"
+          "recognition_mode": "Mode",
+          "recognition_threshold": "Distance threshold (lower is stricter)",
+          "recognition_required_matches": "Consecutive matches required",
+          "auto_open_cooldown_seconds": "Auto-open cooldown, seconds",
+          "face_event_cooldown_seconds": "Duplicate event cooldown, seconds"
+        },
+        "data_description": {
+          "recognition_mode": "Controls whether recognition is off, event-only, or allowed to open the door automatically.",
+          "recognition_threshold": "Dlib distance: lower values require a stricter match.",
+          "recognition_required_matches": "How many consecutive frames must match the same person before confirmation.",
+          "auto_open_cooldown_seconds": "Minimum time between automatic openings of the same intercom.",
+          "face_event_cooldown_seconds": "Suppresses duplicate recognition events for this duration."
+        }
+      },
+      "add_face": {
+        "title": "Add face",
+        "description": "Use a frontal photo containing exactly one person.\n\nKnown faces:\n{known_faces}\n{error_message}",
+        "data": {
+          "face_name": "Name",
+          "face_image": "Photo"
+        },
+        "data_description": {
+          "face_name": "Name exposed in recognition events and the last visitor sensor.",
+          "face_image": "JPG/PNG containing one clearly visible face."
         }
       },
       "remove_face": {
-        "title": "Remove a face",
-        "description": "Pick the guest that should be removed.\n{known_faces}\n{error_message}",
+        "title": "Remove face",
+        "description": "Known faces:\n{known_faces}\n{error_message}",
         "data": {
-          "face_name": "Guest name"
+          "face_name": "Name"
+        },
+        "data_description": {
+          "face_name": "The face and its biometric descriptor will be removed from the current configuration."
         }
       },
       "background_cameras": {
-        "title": "Background camera processing",
-        "description": "Select doorphones that should be analysed in the background.\n{available_doors}\n{error_message}",
+        "title": "Background analysis cameras",
+        "description": "Choose intercom cameras to analyze even when their camera cards are closed.\n{available_doors}",
         "data": {
-          "background_cameras": "Doorphones for background processing"
+          "background_cameras": "Intercoms"
+        },
+        "data_description": {
+          "background_cameras": "Cameras the integration will analyze in the background."
         }
       }
     },
     "error": {
-      "library_missing": "The face_recognition library is not installed on this Home Assistant host.",
-      "invalid_name": "Please enter a valid guest name.",
-      "invalid_image": "Failed to process the uploaded image. Try another file.",
-      "add_failed": "Could not save the face. Check the logs for details.",
-      "remove_failed": "Failed to remove the face. Check the logs for details."
+      "add_failed": "Could not add the face. See Home Assistant logs.",
+      "remove_failed": "Could not remove the face. See Home Assistant logs."
+    }
+  },
+  "entity": {
+    "button": {
+      "open_door": {
+        "name": "Open door"
+      }
+    },
+    "camera": {
+      "door_camera": {
+        "name": "Camera"
+      }
+    },
+    "event": {
+      "door_event": {
+        "name": "Event",
+        "state_attributes": {
+          "event_type": {
+            "state": {
+              "face_recognized": "Face recognized",
+              "unknown_person": "Unknown visitor",
+              "door_opened": "Door opened",
+              "door_open_failed": "Door open failed"
+            }
+          }
+        }
+      }
+    },
+    "sensor": {
+      "balance": {
+        "name": "Balance"
+      },
+      "profile": {
+        "name": "Profile"
+      },
+      "door_status": {
+        "name": "Status"
+      },
+      "last_visitor": {
+        "name": "Last visitor"
+      }
+    }
+  },
+  "exceptions": {
+    "entry_not_found": {
+      "message": "The selected Intersvyaz entry was not found."
+    },
+    "entry_not_loaded": {
+      "message": "The selected Intersvyaz entry is not loaded."
+    },
+    "runtime_not_ready": {
+      "message": "The Intersvyaz entry is still starting."
+    },
+    "door_not_found": {
+      "message": "The selected intercom was not found or cannot be opened."
+    },
+    "mixed_face_payload": {
+      "message": "Do not combine faces with the single-face fields."
+    },
+    "faces_must_be_list": {
+      "message": "The faces field must be a list."
+    },
+    "face_item_invalid": {
+      "message": "Each faces item must be an object."
+    },
+    "face_name_required": {
+      "message": "A name is required for every face."
+    },
+    "face_source_required": {
+      "message": "Each face must contain exactly one image_url or image_base64 source."
+    },
+    "invalid_image_url": {
+      "message": "image_url must be an absolute HTTP or HTTPS URL."
+    }
+  },
+  "services": {
+    "open_door": {
+      "name": "Open intercom",
+      "description": "Opens the selected Intersvyaz intercom; without door_uid the primary intercom is used.",
+      "fields": {
+        "entry_id": {
+          "name": "Intersvyaz account",
+          "description": "Integration entry that owns the intercom."
+        },
+        "door_uid": {
+          "name": "Intercom",
+          "description": "Internal UID of a specific intercom; leave empty for the primary intercom."
+        }
+      }
+    },
+    "add_known_face": {
+      "name": "Add known face",
+      "description": "Adds one or more faces to the local recognition database.",
+      "fields": {
+        "entry_id": {
+          "name": "Intersvyaz account"
+        },
+        "name": {
+          "name": "Name",
+          "description": "Name for single-face mode."
+        },
+        "image_url": {
+          "name": "Photo URL",
+          "description": "Absolute HTTP/HTTPS URL of the image."
+        },
+        "image_base64": {
+          "name": "Base64 photo",
+          "description": "Alternative to image_url."
+        },
+        "faces": {
+          "name": "Multiple faces",
+          "description": "List of objects with name plus exactly one image_url/image_base64 source."
+        }
+      }
+    },
+    "remove_known_face": {
+      "name": "Remove known face",
+      "description": "Removes a face from the local recognition database.",
+      "fields": {
+        "entry_id": {
+          "name": "Intersvyaz account"
+        },
+        "name": {
+          "name": "Name"
+        }
+      }
     }
   }
 }

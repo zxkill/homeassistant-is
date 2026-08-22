@@ -1,780 +1,174 @@
-"""Точка входа интеграции Intersvyaz для Home Assistant."""
+"""Intersvyaz Doorphone integration for Home Assistant."""
 from __future__ import annotations
 
-import asyncio
-import base64
-import binascii
 import logging
-from datetime import timedelta
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Sequence
 
-from aiohttp import ClientError
-import voluptuous as vol
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntryAuthFailed
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
-from homeassistant.exceptions import HomeAssistantError
-from homeassistant.helpers import config_validation as cv
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers.typing import ConfigType
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
-from homeassistant.helpers.event import async_track_time_interval
 
-from .api import IntersvyazApiClient, IntersvyazApiError, RelayInfo
+from .api import IntersvyazApiClient, IntersvyazAuthError
 from .background import DoorBackgroundProcessor
-from .coordinator import IntersvyazDataUpdateCoordinator
 from .const import (
+    CONF_AUTO_OPEN_COOLDOWN_SECONDS,
     CONF_BUYER_ID,
     CONF_CRM_TOKEN,
     CONF_DEVICE_ID,
-    CONF_DOOR_ENTRANCE,
-    CONF_DOOR_ADDRESS,
-    CONF_DOOR_HAS_VIDEO,
-    CONF_DOOR_IMAGE_URL,
-    CONF_DOOR_MAC,
-    CONF_DOOR_OPEN_LINK,
-    CONF_RELAY_NUM,
-    CONF_RELAY_ID,
+    CONF_FACE_EVENT_COOLDOWN_SECONDS,
+    CONF_KNOWN_FACES,
     CONF_MOBILE_TOKEN,
-    DATA_API_CLIENT,
-    DATA_CONFIG,
-    DATA_COORDINATOR,
-    DATA_DOOR_OPENERS,
-    DATA_DOOR_REFRESH_UNSUB,
-    DATA_FACE_MANAGER,
-    DATA_BACKGROUND_PROCESSOR,
-    DATA_OPEN_DOOR,
+    CONF_RECOGNITION_MODE,
+    CONF_RECOGNITION_REQUIRED_MATCHES,
+    CONF_RECOGNITION_THRESHOLD,
     DEFAULT_BUYER_ID,
-    DOOR_LINK_REFRESH_INTERVAL_HOURS,
+    DEFAULT_RECOGNITION_MODE,
     DOMAIN,
-    LOGGER_NAME,
-    SERVICE_ADD_KNOWN_FACE,
-    SERVICE_OPEN_DOOR,
-    SERVICE_REMOVE_KNOWN_FACE,
+    FACE_EVENT_COOLDOWN_SECONDS,
+    FACE_RECOGNITION_COOLDOWN_SECONDS,
+    FACE_RECOGNITION_DISTANCE_THRESHOLD,
+    FACE_REQUIRED_MATCHES_DEFAULT,
+    RECOGNITION_MODE_AUTO_OPEN,
 )
+from .coordinator import IntersvyazDataUpdateCoordinator
+from .door_manager import DoorManager
 from .face_manager import FaceRecognitionManager
+from .runtime import IntersvyazConfigEntry, IntersvyazRuntimeData
+from .services import async_setup_services
+from .snapshot import DoorSnapshotManager
 
-try:
-    VolInvalid = vol.Invalid  # type: ignore[attr-defined]
-except AttributeError:  # pragma: no cover - резерв для облегчённых билдов voluptuous
-    class VolInvalid(Exception):
-        """Локальная замена vol.Invalid для окружений без полной библиотеки."""
+_LOGGER = logging.getLogger("custom_components.intersvyaz")
 
-        pass
+PLATFORMS: list[Platform] = [
+    Platform.SENSOR,
+    Platform.BUTTON,
+    Platform.CAMERA,
+    Platform.EVENT,
+]
 
-    setattr(vol, "Invalid", VolInvalid)
 
-_LOGGER = logging.getLogger(LOGGER_NAME)
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Set up integration-wide actions independently from config entries."""
 
-PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.BUTTON, Platform.CAMERA]
-
-SERVICE_OPEN_DOOR_SCHEMA = vol.Schema(
-    {
-        vol.Required("entry_id"): cv.string,
-        vol.Optional("door_uid"): cv.string,
-    }
-)
-
-def _validate_add_face_payload(data: dict[str, Any]) -> dict[str, Any]:
-    """Проверить, что схема сервиса добавления лиц заполнена корректно."""
-
-    # Превращаем список лиц в единый формат, чтобы дальнейшая обработка валидации
-    # была одинаковой для одиночного и пакетного режима.
-    faces_raw = data.get("faces")
-    faces: Sequence[dict[str, Any]] | None
-    if faces_raw is None:
-        faces = None
-    elif isinstance(faces_raw, (list, tuple, set)):
-        faces = list(faces_raw)
-    else:
-        faces = [faces_raw]
-    has_single_fields = any(data.get(field) for field in ("name", "image_url", "image_base64"))
-
-    if faces:
-        if has_single_fields:
-            raise VolInvalid(
-                "Нельзя одновременно указывать список faces и одиночные поля name/image_*"
-            )
-        if not isinstance(faces, Sequence) or not faces:
-            raise VolInvalid("Список faces должен содержать минимум одну запись")
-
-        normalized_faces: list[dict[str, Any]] = []
-        for index, face in enumerate(faces, start=1):
-            if not isinstance(face, dict):
-                raise VolInvalid(
-                    f"Элемент №{index} в faces должен быть словарём с параметрами"
-                )
-            if not face.get("name"):
-                raise VolInvalid(f"Лицо №{index} должно содержать имя в поле name")
-            has_url = bool(face.get("image_url"))
-            has_base64 = bool(face.get("image_base64"))
-            if has_url == has_base64:
-                raise VolInvalid(
-                    f"Лицо №{index} должно содержать ровно один источник изображения"
-                )
-            normalized_faces.append(face)
-        data["faces"] = normalized_faces
-        return data
-
-    if not data.get("name"):
-        raise VolInvalid("Поле name обязательно для одиночного добавления лица")
-
-    has_url = bool(data.get("image_url"))
-    has_base64 = bool(data.get("image_base64"))
-    if has_url == has_base64:
-        raise VolInvalid(
-            "Укажите ровно один источник изображения: image_url или image_base64"
-        )
-
-    return data
-
-
-ADD_KNOWN_FACE_SCHEMA = vol.Schema(
-    {
-        vol.Required("entry_id"): cv.string,
-        vol.Optional("name"): cv.string,
-        vol.Optional("image_url"): cv.string,
-        vol.Optional("image_base64"): cv.string,
-        vol.Optional("faces"): list,
-    }
-)
-
-REMOVE_KNOWN_FACE_SCHEMA = vol.Schema(
-    {
-        vol.Required("entry_id"): cv.string,
-        vol.Required("name"): cv.string,
-    }
-)
-
-
-async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Настроить интеграцию Intersvyaz на основе записи конфигурации."""
-
-    _LOGGER.info("Запуск настройки entry_id=%s", entry.entry_id)
-    hass.data.setdefault(DOMAIN, {})
-
-    config_data = dict(entry.data)
-    session = async_get_clientsession(hass)
-    buyer_id = int(config_data.get(CONF_BUYER_ID, DEFAULT_BUYER_ID))
-
-    api_client = IntersvyazApiClient(
-        session=session,
-        device_id=config_data.get(CONF_DEVICE_ID),
-        buyer_id=buyer_id,
-    )
-
-    if CONF_MOBILE_TOKEN in config_data:
-        api_client.set_mobile_token(config_data[CONF_MOBILE_TOKEN])
-    if CONF_CRM_TOKEN in config_data:
-        api_client.set_crm_token(config_data[CONF_CRM_TOKEN])
-
-    coordinator = IntersvyazDataUpdateCoordinator(hass, api_client)
-    await coordinator.async_config_entry_first_refresh()
-
-    # Получаем перечень домофонов, доступных пользователю. Эти данные используются
-    # для генерации отдельных кнопок открытия по каждому адресу и для камер.
-    try:
-        relays = await api_client.async_get_relays()
-        _LOGGER.info(
-            "Получено %s домофонов для entry_id=%s", len(relays), entry.entry_id
-        )
-    except IntersvyazApiError as err:
-        _LOGGER.warning(
-            "Не удалось обновить список домофонов при настройке entry_id=%s: %s. "
-            "Будут использованы сведения из конфигурации.",
-            entry.entry_id,
-            err,
-        )
-        relays = []
-
-    def _make_open_callable(door_entry: Dict[str, Any]) -> Callable[[], Awaitable[None]]:
-        """Создать корутину для открытия конкретного домофона."""
-
-        async def _async_open_door() -> None:
-            """Выполнить команду открытия с подробным логированием."""
-
-            mac = door_entry.get("mac")
-            door_id = door_entry.get("door_id")
-            address = door_entry.get("address")
-            open_link = door_entry.get("open_link")
-            _LOGGER.info(
-                "Выполняем команду открытия домофона entry_id=%s uid=%s "
-                "(mac=%s, door_id=%s, адрес=%s, open_link=%s)",
-                entry.entry_id,
-                door_entry.get("uid"),
-                mac,
-                door_id,
-                address,
-                open_link,
-            )
-            await api_client.async_open_door(
-                mac,
-                door_id,
-                open_link=open_link,
-            )
-            await _persist_tokens(hass, entry, api_client)
-
-        return _async_open_door
-
-    door_openers: List[Dict[str, Any]] = []
-    seen_uids: set[str] = set()
-
-    for index, relay in enumerate(_sort_relays(relays), start=1):
-        door_payload = _build_door_entry_payload(entry.entry_id, relay, index)
-        if not door_payload:
-            continue
-
-        door_uid = door_payload["uid"]
-        if door_uid in seen_uids:
-            _LOGGER.debug(
-                "Пропускаем дублирующийся домофон uid=%s", door_uid
-            )
-            continue
-
-        door_entry = dict(door_payload)
-        door_entry["callback"] = _make_open_callable(door_entry)
-        door_openers.append(door_entry)
-        seen_uids.add(door_uid)
-        _LOGGER.debug(
-            "Подготовлена кнопка домофона uid=%s: %s",
-            door_uid,
-            {k: v for k, v in door_entry.items() if k != "callback"},
-        )
-
-    if not door_openers:
-        # В случае ошибки получения списка домофонов используем ранее сохранённую
-        # информацию, чтобы пользователь не терял доступ к кнопке открытия.
-        fallback_mac = str(config_data.get(CONF_DOOR_MAC, "") or "").upper()
-        fallback_door_id = int(
-            config_data.get(CONF_RELAY_NUM, config_data.get(CONF_DOOR_ENTRANCE, 1))
-        )
-        fallback_address = config_data.get(CONF_DOOR_ADDRESS) or "Домофон"
-        fallback_open_link = config_data.get(CONF_DOOR_OPEN_LINK)
-        fallback_image = config_data.get(CONF_DOOR_IMAGE_URL)
-        fallback_has_video = bool(config_data.get(CONF_DOOR_HAS_VIDEO))
-        fallback_uid = (
-            f"{entry.entry_id}_door_{fallback_mac.replace(':', '').lower()}_{fallback_door_id}"
-            if fallback_mac
-            else f"{entry.entry_id}_door_fallback_{fallback_door_id}"
-        )
-        _LOGGER.info(
-            "Используем резервные данные для кнопки домофона entry_id=%s (mac=%s, door_id=%s)",
-            entry.entry_id,
-            fallback_mac,
-            fallback_door_id,
-        )
-        fallback_entry: Dict[str, Any] = {
-            "uid": fallback_uid,
-            "mac": fallback_mac,
-            "door_id": fallback_door_id,
-            "address": fallback_address,
-            "is_main": True,
-            "is_shared": False,
-            "relay_id": config_data.get(CONF_RELAY_ID),
-            "relay_num": config_data.get(CONF_RELAY_NUM),
-            "porch_num": config_data.get(CONF_DOOR_ENTRANCE),
-            "open_link": fallback_open_link,
-            "image_url": fallback_image,
-            "has_video": fallback_has_video,
-        }
-        fallback_entry["callback"] = _make_open_callable(fallback_entry)
-        door_openers.append(fallback_entry)
-
-    default_entry = next(
-        (door for door in door_openers if door.get("is_main")),
-        door_openers[0],
-    )
-
-    # Сохраняем все вспомогательные сущности в хранилище Home Assistant, чтобы
-    # сервисы и другие части интеграции могли безопасно переиспользовать их.
-    hass.data[DOMAIN][entry.entry_id] = {
-        DATA_API_CLIENT: api_client,
-        DATA_COORDINATOR: coordinator,
-        DATA_CONFIG: config_data,
-        DATA_OPEN_DOOR: default_entry["callback"],
-        DATA_DOOR_OPENERS: door_openers,
-        DATA_DOOR_REFRESH_UNSUB: None,
-    }
-
-    face_manager = FaceRecognitionManager(hass, entry)
-    hass.data[DOMAIN][entry.entry_id][DATA_FACE_MANAGER] = face_manager
-
-    background_processor = DoorBackgroundProcessor(hass, entry)
-    hass.data[DOMAIN][entry.entry_id][DATA_BACKGROUND_PROCESSOR] = background_processor
-    await background_processor.async_setup()
-
-    _sync_config_with_primary_door(hass, entry, door_openers)
-
-    async def _scheduled_refresh(_now=None) -> None:
-        """Периодически обновлять ссылки открытия и снимки домофонов."""
-
-        await _async_refresh_door_links(hass, entry, api_client)
-
-    refresh_interval = timedelta(hours=DOOR_LINK_REFRESH_INTERVAL_HOURS)
-    hass.data[DOMAIN][entry.entry_id][DATA_DOOR_REFRESH_UNSUB] = (
-        async_track_time_interval(hass, _scheduled_refresh, refresh_interval)
-    )
-    _LOGGER.info(
-        "Плановое обновление ссылок домофонов для entry_id=%s будет выполняться каждые %s часов",
-        entry.entry_id,
-        DOOR_LINK_REFRESH_INTERVAL_HOURS,
-    )
-
-    _LOGGER.info(
-        "Для entry_id=%s подготовлено %s кнопок открытия домофона (основной uid=%s)",
-        entry.entry_id,
-        len(door_openers),
-        default_entry["uid"],
-    )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_OPEN_DOOR):
-
-        async def handle_open_door(call: ServiceCall) -> None:
-            """Открыть домофон с использованием сохранённой конфигурации."""
-
-            service_entry_id = call.data["entry_id"]
-            requested_door_uid = call.data.get("door_uid")
-            domain_data = hass.data.get(DOMAIN, {})
-            entry_storage = domain_data.get(service_entry_id)
-            if not entry_storage:
-                raise HomeAssistantError(
-                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
-                )
-            door_openers: List[Dict[str, Any]] = entry_storage.get(
-                DATA_DOOR_OPENERS, []
-            )
-            open_door_callable: Optional[Callable[[], Awaitable[None]]]
-            target_door: Optional[Dict[str, Any]] = None
-            if requested_door_uid:
-                target_door = next(
-                    (door for door in door_openers if door.get("uid") == requested_door_uid),
-                    None,
-                )
-                if not target_door:
-                    raise HomeAssistantError(
-                        f"Домофон с идентификатором {requested_door_uid} не найден для entry_id={service_entry_id}"
-                    )
-            elif door_openers:
-                target_door = next(
-                    (door for door in door_openers if door.get("is_main")),
-                    door_openers[0],
-                )
-
-            if target_door:
-                open_door_callable = target_door.get("callback")
-                _LOGGER.info(
-                    "Запрошено открытие домофона uid=%s через сервис для entry_id=%s",
-                    target_door.get("uid"),
-                    service_entry_id,
-                )
-            else:
-                open_door_callable = entry_storage.get(DATA_OPEN_DOOR)
-
-            if not callable(open_door_callable):
-                raise HomeAssistantError(
-                    "Сервис открытия домофона не настроен для данной записи"
-                )
-            try:
-                await open_door_callable()
-            except IntersvyazApiError as err:
-                _LOGGER.error("Не удалось открыть домофон: %s", err)
-                raise HomeAssistantError(str(err)) from err
-
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_OPEN_DOOR,
-            handle_open_door,
-            schema=SERVICE_OPEN_DOOR_SCHEMA,
-        )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_ADD_KNOWN_FACE):
-
-        async def handle_add_known_face(call: ServiceCall) -> None:
-            """Сохранить одно или несколько лиц для автоматического открытия домофона."""
-
-            call_data = _validate_add_face_payload(dict(call.data))
-            service_entry_id = call_data["entry_id"]
-
-            domain_data = hass.data.get(DOMAIN, {})
-            entry_storage = domain_data.get(service_entry_id)
-            if not entry_storage:
-                raise HomeAssistantError(
-                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
-                )
-
-            face_manager: FaceRecognitionManager | None = entry_storage.get(
-                DATA_FACE_MANAGER
-            )
-            if not face_manager:
-                raise HomeAssistantError(
-                    "Распознавание лиц не инициализировано для указанной записи"
-                )
-
-            # Составляем список лиц, соблюдая обратную совместимость с одиночным режимом.
-            faces_payload: list[dict[str, Any]]
-            if call_data.get("faces"):
-                faces_payload = list(call_data["faces"])
-            else:
-                faces_payload = [
-                    {
-                        "name": call_data["name"],
-                        "image_url": call_data.get("image_url"),
-                        "image_base64": call_data.get("image_base64"),
-                    }
-                ]
-
-            session = async_get_clientsession(hass)
-
-            async def _load_image_bytes(face_data: dict[str, Any]) -> bytes:
-                """Получить байты изображения для конкретного лица."""
-
-                image_url = face_data.get("image_url")
-                image_base64 = face_data.get("image_base64")
-
-                if image_url:
-                    _LOGGER.info(
-                        "Загружаем изображение лица '%s' по URL для entry_id=%s",\
-                        face_data.get("name"),
-                        service_entry_id,
-                    )
-                    try:
-                        async with session.get(image_url) as response:
-                            if response.status != 200:
-                                raise HomeAssistantError(
-                                    "Не удалось загрузить изображение по URL %s: статус %s"
-                                    % (image_url, response.status)
-                                )
-                            return await response.read()
-                    except (ClientError, asyncio.TimeoutError) as err:
-                        raise HomeAssistantError(
-                            f"Ошибка загрузки изображения по URL {image_url}: {err}"
-                        ) from err
-
-                try:
-                    _LOGGER.debug(
-                        "Декодируем изображение лица '%s' из base64 для entry_id=%s",
-                        face_data.get("name"),
-                        service_entry_id,
-                    )
-                    return base64.b64decode(image_base64, validate=True)
-                except (binascii.Error, ValueError) as err:
-                    raise HomeAssistantError(
-                        "Не удалось декодировать image_base64, проверьте строку"
-                    ) from err
-
-            for index, face_data in enumerate(faces_payload, start=1):
-                face_name = face_data.get("name")
-                _LOGGER.info(
-                    "Добавляем лицо №%s ('%s') через сервис для entry_id=%s",\
-                    index,
-                    face_name,
-                    service_entry_id,
-                )
-                image_bytes = await _load_image_bytes(face_data)
-                await face_manager.async_add_known_face(face_name, image_bytes)
-                _LOGGER.info(
-                    "Лицо '%s' успешно сохранено для entry_id=%s", face_name, service_entry_id
-                )
-
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_ADD_KNOWN_FACE,
-            handle_add_known_face,
-            schema=ADD_KNOWN_FACE_SCHEMA,
-        )
-
-    if not hass.services.has_service(DOMAIN, SERVICE_REMOVE_KNOWN_FACE):
-
-        async def handle_remove_known_face(call: ServiceCall) -> None:
-            """Удалить сохранённое лицо и сбросить автоматическое открытие."""
-
-            service_entry_id = call.data["entry_id"]
-            name = call.data["name"]
-            domain_data = hass.data.get(DOMAIN, {})
-            entry_storage = domain_data.get(service_entry_id)
-            if not entry_storage:
-                raise HomeAssistantError(
-                    f"Интеграция Intersvyaz с entry_id={service_entry_id} не найдена"
-                )
-
-            face_manager: FaceRecognitionManager | None = entry_storage.get(
-                DATA_FACE_MANAGER
-            )
-            if not face_manager:
-                raise HomeAssistantError(
-                    "Распознавание лиц не инициализировано для указанной записи"
-                )
-
-            await face_manager.async_remove_known_face(name)
-
-        hass.services.async_register(
-            DOMAIN,
-            SERVICE_REMOVE_KNOWN_FACE,
-            handle_remove_known_face,
-            schema=REMOVE_KNOWN_FACE_SCHEMA,
-        )
-
-    entry.async_on_unload(entry.add_update_listener(_async_handle_entry_update))
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-    _LOGGER.info("Интеграция Intersvyaz успешно настроена")
+    await async_setup_services(hass)
+    _LOGGER.debug("Глобальные actions Intersvyaz готовы")
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
-    """Выгрузить конфигурацию интеграции."""
-
-    _LOGGER.info("Выгрузка entry_id=%s", entry.entry_id)
-
-    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
-    domain_store = hass.data.get(DOMAIN, {})
-    entry_store = domain_store.pop(entry.entry_id, None)
-    if entry_store:
-        unsubscribe = entry_store.get(DATA_DOOR_REFRESH_UNSUB)
-        if callable(unsubscribe):
-            unsubscribe()
-        entry_store.pop(DATA_FACE_MANAGER, None)
-        background_processor = entry_store.get(DATA_BACKGROUND_PROCESSOR)
-        if isinstance(background_processor, DoorBackgroundProcessor):
-            background_processor.async_stop()
-        entry_store.pop(DATA_BACKGROUND_PROCESSOR, None)
-    if not domain_store:
-        hass.services.async_remove(DOMAIN, SERVICE_OPEN_DOOR)
-        hass.data.pop(DOMAIN, None)
-
-    return unload_ok
-
-
-async def _persist_tokens(
-    hass: HomeAssistant, entry: ConfigEntry, api_client: IntersvyazApiClient
-) -> None:
-    """Сохранить обновлённые токены в записи конфигурации."""
-
-    domain_store = hass.data.get(DOMAIN)
-    if not domain_store or entry.entry_id not in domain_store:
-        _LOGGER.debug(
-            "Запрошено сохранение токенов, но запись entry_id=%s не найдена", entry.entry_id
-        )
-        return
-    stored = domain_store[entry.entry_id]
-    config_data: Dict[str, Any] = dict(stored.get(DATA_CONFIG, {}))
-
-    if api_client.mobile_token:
-        config_data[CONF_MOBILE_TOKEN] = api_client.mobile_token.raw
-    if api_client.crm_token:
-        config_data[CONF_CRM_TOKEN] = api_client.crm_token.raw
-
-    if config_data != entry.data:
-        _LOGGER.debug("Обнаружены обновления токенов, сохраняем в конфигурации")
-        hass.config_entries.async_update_entry(entry, data=config_data)
-        stored[DATA_CONFIG] = config_data
-
-
-def _sort_relays(relays: Iterable[RelayInfo]) -> List[RelayInfo]:
-    """Отсортировать список домофонов: основной подъезд сверху."""
-
-    return sorted(
-        relays,
-        key=lambda relay: (
-            not getattr(relay, "is_main", False),
-            (getattr(relay, "address", "") or "").lower(),
-        ),
-    )
-
-
-def _build_door_entry_payload(
-    entry_id: str, relay: RelayInfo, index: int
-) -> Optional[Dict[str, Any]]:
-    """Преобразовать структуру RelayInfo в словарь с данными домофона."""
-
-    opener = getattr(relay, "opener", None)
-    mac_candidate = (
-        (relay.mac or "")
-        or (opener.mac if opener and getattr(opener, "mac", None) else "")
-    ).strip()
-    if not mac_candidate:
-        _LOGGER.debug(
-            "Пропускаем домофон без MAC-адреса при подготовке кнопок: %s",
-            getattr(relay, "raw", relay),
-        )
-        return None
-
-    door_id: Optional[int] = None
-    if opener and getattr(opener, "relay_num", None) is not None:
-        door_id = opener.relay_num
-    elif getattr(relay, "porch_num", None):
-        try:
-            door_id = int(relay.porch_num)
-        except (TypeError, ValueError):
-            door_id = None
-    if door_id is None:
-        door_id = 1
-
-    mac_normalized = mac_candidate.upper()
-    door_uid = f"{entry_id}_door_{mac_normalized.replace(':', '').lower()}_{door_id}"
-    address = (getattr(relay, "address", "") or f"Домофон №{index}").strip()
-    if not address:
-        address = f"Домофон №{index}"
-
-    open_link = getattr(relay, "open_link", None)
-    if isinstance(open_link, str):
-        open_link = open_link.strip() or None
-    image_url = getattr(relay, "image_url", None)
-    if isinstance(image_url, str):
-        image_url = image_url.strip() or None
-
-    door_entry: Dict[str, Any] = {
-        "uid": door_uid,
-        "mac": mac_normalized,
-        "door_id": int(door_id),
-        "address": address,
-        "is_main": bool(getattr(relay, "is_main", False)),
-        "is_shared": not bool(getattr(relay, "is_main", False)),
-        "relay_id": getattr(opener, "relay_id", None),
-        "relay_num": getattr(opener, "relay_num", None),
-        "porch_num": getattr(relay, "porch_num", None),
-        "open_link": open_link,
-        "image_url": image_url,
-        "has_video": bool(getattr(relay, "has_video", False)),
-    }
-    return door_entry
-
-
-def _sync_config_with_primary_door(
-    hass: HomeAssistant, entry: ConfigEntry, door_openers: Iterable[Dict[str, Any]]
-) -> None:
-    """Синхронизировать конфигурацию с актуальным основным домофоном."""
-
-    domain_store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if not domain_store:
-        _LOGGER.debug(
-            "Запрошено обновление конфигурации домофона, но запись entry_id=%s не найдена",
-            entry.entry_id,
-        )
-        return
-
-    config_data: Dict[str, Any] = dict(domain_store.get(DATA_CONFIG, entry.data))
-    primary = next((door for door in door_openers if door.get("is_main")), None)
-    if not primary:
-        primary = next(iter(door_openers), None)
-    if not primary:
-        _LOGGER.debug(
-            "Не удалось найти данные домофона для синхронизации конфигурации entry_id=%s",
-            entry.entry_id,
-        )
-        return
-
-    updates = {
-        CONF_DOOR_MAC: primary.get("mac"),
-        CONF_RELAY_NUM: primary.get("door_id"),
-        CONF_DOOR_ADDRESS: primary.get("address"),
-        CONF_DOOR_ENTRANCE: primary.get("porch_num"),
-        CONF_RELAY_ID: primary.get("relay_id"),
-        CONF_DOOR_HAS_VIDEO: primary.get("has_video"),
-        CONF_DOOR_IMAGE_URL: primary.get("image_url"),
-        CONF_DOOR_OPEN_LINK: primary.get("open_link"),
-    }
-
-    changed = False
-    for key, value in updates.items():
-        if config_data.get(key) != value:
-            config_data[key] = value
-            changed = True
-
-    if changed:
-        _LOGGER.debug(
-            "Обновляем сохранённую конфигурацию entry_id=%s актуальными ссылками и адресом",
-            entry.entry_id,
-        )
-        hass.config_entries.async_update_entry(entry, data=config_data)
-        domain_store[DATA_CONFIG] = config_data
-
-
-async def _async_refresh_door_links(
-    hass: HomeAssistant, entry: ConfigEntry, api_client: IntersvyazApiClient
-) -> None:
-    """Перезапросить список домофонов и обновить ссылки открытия/снимков."""
+async def async_setup_entry(
+    hass: HomeAssistant,
+    entry: IntersvyazConfigEntry,
+) -> bool:
+    """Set up one Intersvyaz account."""
 
     _LOGGER.info(
-        "Запускаем плановое обновление ссылок домофонов для entry_id=%s",
+        "Настройка Intersvyaz: entry_id=%s config_version=%s",
         entry.entry_id,
+        entry.version,
+    )
+    data = dict(entry.data)
+    api = IntersvyazApiClient(
+        async_get_clientsession(hass),
+        device_id=data.get(CONF_DEVICE_ID),
+        buyer_id=int(data.get(CONF_BUYER_ID, DEFAULT_BUYER_ID)),
     )
     try:
-        relays = await api_client.async_get_relays()
-    except IntersvyazApiError as err:
-        _LOGGER.warning(
-            "Не удалось обновить ссылки домофонов entry_id=%s: %s",
-            entry.entry_id,
-            err,
-        )
-        return
+        if data.get(CONF_MOBILE_TOKEN):
+            api.set_mobile_token(data[CONF_MOBILE_TOKEN])
+        if data.get(CONF_CRM_TOKEN):
+            api.set_crm_token(data[CONF_CRM_TOKEN])
+    except IntersvyazAuthError as err:
+        raise ConfigEntryAuthFailed("Сохранённые credentials Интерсвязи некорректны") from err
 
-    domain_store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if not domain_store:
-        _LOGGER.debug(
-            "Запрошено обновление ссылок, но запись entry_id=%s не найдена",
-            entry.entry_id,
-        )
-        return
+    coordinator = IntersvyazDataUpdateCoordinator(hass, api)
+    await coordinator.async_config_entry_first_refresh()
 
-    door_openers: List[Dict[str, Any]] = domain_store.get(DATA_DOOR_OPENERS, [])
-    if not door_openers:
-        _LOGGER.debug(
-            "В списке entry_id=%s отсутствуют домофоны для обновления ссылок",
-            entry.entry_id,
-        )
-        return
+    door_manager = DoorManager(hass, entry, api)
+    try:
+        await door_manager.async_setup()
+    except IntersvyazAuthError as err:
+        raise ConfigEntryAuthFailed("Требуется повторная авторизация Интерсвязи") from err
 
-    existing_by_uid = {
-        door.get("uid"): door for door in door_openers if door.get("uid")
-    }
+    snapshot_manager = DoorSnapshotManager(hass)
+    face_manager = FaceRecognitionManager(hass, entry)
+    runtime = IntersvyazRuntimeData(
+        api=api,
+        coordinator=coordinator,
+        door_manager=door_manager,
+        snapshot_manager=snapshot_manager,
+        face_manager=face_manager,
+    )
+    entry.runtime_data = runtime
 
-    for index, relay in enumerate(_sort_relays(relays), start=1):
-        payload = _build_door_entry_payload(entry.entry_id, relay, index)
-        if not payload:
-            continue
-        uid = payload["uid"]
-        door_entry = existing_by_uid.get(uid)
-        if not door_entry:
-            _LOGGER.info(
-                "Обнаружен новый домофон uid=%s для entry_id=%s. Перезапустите "
-                "интеграцию для создания дополнительных сущностей.",
-                uid,
-                entry.entry_id,
-            )
-            continue
-        for key, value in payload.items():
-            if key == "uid":
-                continue
-            door_entry[key] = value
-        _LOGGER.debug(
-            "Обновлены данные домофона uid=%s: open_link=%s image_url=%s",
-            uid,
-            door_entry.get("open_link"),
-            door_entry.get("image_url"),
-        )
+    background = DoorBackgroundProcessor(hass, entry)
+    runtime.background_processor = background
+    await background.async_setup()
+    door_manager.start_periodic_refresh()
 
-    _sync_config_with_primary_door(hass, entry, door_openers)
-    primary = next((door for door in door_openers if door.get("is_main")), None)
-    if not primary and door_openers:
-        primary = door_openers[0]
-    if primary and callable(primary.get("callback")):
-        domain_store[DATA_OPEN_DOOR] = primary["callback"]
+    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
-    background_processor = domain_store.get(DATA_BACKGROUND_PROCESSOR)
-    if isinstance(background_processor, DoorBackgroundProcessor):
-        await background_processor.async_refresh_from_options()
+    _LOGGER.info(
+        "Intersvyaz готов: entry_id=%s doors=%s recognition=%s",
+        entry.entry_id,
+        len(runtime.doors),
+        face_manager.recognition_mode,
+    )
+    return True
 
 
-async def _async_handle_entry_update(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Перезапустить фоновые задачи при изменении настроек записи."""
+async def async_unload_entry(
+    hass: HomeAssistant,
+    entry: IntersvyazConfigEntry,
+) -> bool:
+    """Unload one account and all its background resources."""
 
-    domain_store = hass.data.get(DOMAIN, {}).get(entry.entry_id)
-    if not domain_store:
-        _LOGGER.debug(
-            "Получено уведомление об обновлении entry_id=%s, но данные не найдены",
-            entry.entry_id,
-        )
-        return
+    _LOGGER.info("Выгрузка Intersvyaz: entry_id=%s", entry.entry_id)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unload_ok:
+        return False
 
-    background_processor = domain_store.get(DATA_BACKGROUND_PROCESSOR)
-    if isinstance(background_processor, DoorBackgroundProcessor):
-        await background_processor.async_refresh_from_options()
+    runtime = entry.runtime_data
+    if runtime.background_processor is not None:
+        runtime.background_processor.async_stop()
+    runtime.door_manager.stop()
+    runtime.snapshot_manager.invalidate()
+    return True
+
+
+async def async_migrate_entry(hass: HomeAssistant, entry: IntersvyazConfigEntry) -> bool:
+    """Migrate 1.x/2.0-beta config entry options to stable 2.0 schema."""
+
+    _LOGGER.info(
+        "Миграция Intersvyaz entry_id=%s version=%s -> 3",
+        entry.entry_id,
+        entry.version,
+    )
+    if entry.version > 3:
+        _LOGGER.error("ConfigEntry создан более новой версией интеграции")
+        return False
+    if entry.version == 3:
+        return True
+
+    options = dict(entry.options)
+    had_faces = bool(options.get(CONF_KNOWN_FACES))
+    # Старые версии открывали дверь после первого совпадения. Для уже существующей
+    # конфигурации сохраняем поведение. Новые установки 2.0 по умолчанию безопаснее:
+    # observe + два последовательных совпадения.
+    options.setdefault(
+        CONF_RECOGNITION_MODE,
+        RECOGNITION_MODE_AUTO_OPEN if had_faces else DEFAULT_RECOGNITION_MODE,
+    )
+    options.setdefault(CONF_RECOGNITION_THRESHOLD, FACE_RECOGNITION_DISTANCE_THRESHOLD)
+    options.setdefault(CONF_RECOGNITION_REQUIRED_MATCHES, 1 if had_faces else FACE_REQUIRED_MATCHES_DEFAULT)
+    options.setdefault(CONF_AUTO_OPEN_COOLDOWN_SECONDS, FACE_RECOGNITION_COOLDOWN_SECONDS)
+    options.setdefault(CONF_FACE_EVENT_COOLDOWN_SECONDS, FACE_EVENT_COOLDOWN_SECONDS)
+
+    hass.config_entries.async_update_entry(entry, options=options, version=3)
+    _LOGGER.info(
+        "Миграция завершена: legacy_faces=%s mode=%s required=%s",
+        had_faces,
+        options[CONF_RECOGNITION_MODE],
+        options[CONF_RECOGNITION_REQUIRED_MATCHES],
+    )
+    return True
