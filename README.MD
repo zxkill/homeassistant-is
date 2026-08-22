@@ -24,6 +24,8 @@
 
 ## Установка через HACS
 
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=zxkill&repository=homeassistant-is&category=integration)
+
 1. Откройте **HACS → Integrations → Custom repositories**.
 2. Добавьте репозиторий `https://github.com/zxkill/homeassistant-is` как **Integration**.
 3. Установите **Intersvyaz Doorphone**.
