@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from homeassistant.components.sensor import SensorDeviceClass, SensorEntity
-from homeassistant.const import EntityCategory, UnitOfCurrency
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.dispatcher import async_dispatcher_connect
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -50,7 +50,7 @@ class IntersvyazBalanceSensor(_AccountSensor):
 
     _attr_translation_key = "balance"
     _attr_device_class = SensorDeviceClass.MONETARY
-    _attr_native_unit_of_measurement = UnitOfCurrency.RUBLE
+    _attr_native_unit_of_measurement = "RUB"
 
     def __init__(self, coordinator, entry: IntersvyazConfigEntry) -> None:
         super().__init__(coordinator, entry)
