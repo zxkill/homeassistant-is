@@ -70,13 +70,17 @@
       "init": {
         "title": "Intersvyaz settings",
         "description": "Recognition mode: {recognition_mode}\n\nKnown faces:\n{known_faces}\n{error_message}",
-        "menu": {
-          "options": {
-            "recognition_settings": "Recognition and auto-open",
-            "add_face": "Add face",
-            "remove_face": "Remove face",
-            "background_cameras": "Background analysis cameras"
-          }
+        "menu_options": {
+          "recognition_settings": "Recognition and auto-open",
+          "add_face": "Add face",
+          "remove_face": "Remove face",
+          "background_cameras": "Background analysis cameras"
+        },
+        "menu_option_descriptions": {
+          "recognition_settings": "Configure recognition mode, match threshold, confirmation and safe automatic door opening.",
+          "add_face": "Upload a photo and add a person to the local recognition database.",
+          "remove_face": "Remove a previously added person and the locally stored biometric descriptor.",
+          "background_cameras": "Choose intercom cameras whose snapshots will be analyzed in the background."
         }
       },
       "recognition_settings": {

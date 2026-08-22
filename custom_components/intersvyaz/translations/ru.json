@@ -68,15 +68,19 @@
   "options": {
     "step": {
       "init": {
-        "title": "Настройки Intersvyaz",
+        "title": "Настройки Интерсвязи",
         "description": "Режим распознавания: {recognition_mode}\n\nИзвестные лица:\n{known_faces}\n{error_message}",
-        "menu": {
-          "options": {
-            "recognition_settings": "Распознавание и автооткрытие",
-            "add_face": "Добавить лицо",
-            "remove_face": "Удалить лицо",
-            "background_cameras": "Камеры фонового анализа"
-          }
+        "menu_options": {
+          "recognition_settings": "Распознавание и автооткрытие",
+          "add_face": "Добавить лицо",
+          "remove_face": "Удалить лицо",
+          "background_cameras": "Камеры фонового анализа"
+        },
+        "menu_option_descriptions": {
+          "recognition_settings": "Настроить режим распознавания, порог совпадения, подтверждение и безопасное автооткрытие.",
+          "add_face": "Загрузить фотографию и добавить человека в локальную базу распознавания.",
+          "remove_face": "Удалить ранее добавленного человека и его локальный биометрический дескриптор.",
+          "background_cameras": "Выбрать домофоны, снимки которых будут анализироваться в фоне."
         }
       },
       "recognition_settings": {
