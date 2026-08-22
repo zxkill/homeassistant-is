@@ -48,6 +48,32 @@ class IntersvyazOptionsFlow(OptionsFlow):
     def _typed_entry(self) -> IntersvyazConfigEntry:
         return self._entry  # type: ignore[return-value]
 
+    def _recognition_mode_label(self, mode: str) -> str:
+        """Вернуть человекочитаемое название режима для сводки настроек."""
+
+        language = (self.hass.config.language or "en").split("-")[0].lower()
+        labels = {
+            "ru": {
+                RECOGNITION_MODE_OFF: "Выключено",
+                RECOGNITION_MODE_OBSERVE: "Только распознавать",
+                RECOGNITION_MODE_AUTO_OPEN: "Распознавать и автоматически открывать",
+            },
+            "en": {
+                RECOGNITION_MODE_OFF: "Off",
+                RECOGNITION_MODE_OBSERVE: "Recognize only",
+                RECOGNITION_MODE_AUTO_OPEN: "Recognize and open automatically",
+            },
+        }
+        label = labels.get(language, labels["en"]).get(mode, mode)
+        _LOGGER.debug(
+            "[OPTIONS_FLOW][MODE_LABEL] entry_id=%s mode=%s language=%s label=%s",
+            self._entry.entry_id,
+            mode,
+            language,
+            label,
+        )
+        return label
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -66,7 +92,7 @@ class IntersvyazOptionsFlow(OptionsFlow):
             menu_options=menu_options,
             description_placeholders={
                 "known_faces": self._format_names(names),
-                "recognition_mode": manager.recognition_mode,
+                "recognition_mode": self._recognition_mode_label(manager.recognition_mode),
                 "error_message": self._last_error or "",
             },
         )
