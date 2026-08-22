@@ -4,7 +4,7 @@ import json
 def test_manifest_is_stable_v2(component_root):
     manifest = json.loads((component_root / "manifest.json").read_text())
     assert manifest["domain"] == "intersvyaz"
-    assert manifest["version"] == "2.0.1"
+    assert manifest["version"] == "2.0.2"
     assert manifest["config_flow"] is True
     assert manifest["integration_type"] == "hub"
     assert "dlib-bin==20.0.1" in manifest["requirements"]

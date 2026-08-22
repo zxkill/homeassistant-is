@@ -36,6 +36,7 @@ from .const import (
     CONF_DOOR_ENTRANCE,
     CONF_DOOR_HAS_VIDEO,
     CONF_DOOR_IMAGE_URL,
+    CONF_DOOR_MAC,
     CONF_ENTRANCE_UID,
     CONF_MOBILE_ACCESS_BEGIN,
     CONF_MOBILE_ACCESS_END,
@@ -253,6 +254,7 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
         )
 
     async def _async_select_account(self, user_id: str) -> ConfigFlowResult:
+        _LOGGER.info("[CONFIG_FLOW][ACCOUNT_SELECTED] source=%s", self.source)
         if not self._api_client or not self._auth_id:
             return self.async_abort(reason="auth_context_lost")
         try:
@@ -262,6 +264,7 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
             return await self.async_step_select_account()
 
         self._mobile_token = token
+        _LOGGER.info("[CONFIG_FLOW][MOBILE_TOKEN_OK] source=%s", self.source)
         if token.unique_device_id:
             self._device_id = token.unique_device_id
         await self.async_set_unique_id(str(token.user_id), raise_on_progress=False)
@@ -275,11 +278,13 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
         assert self._api_client is not None
         assert self._mobile_token is not None
 
+        _LOGGER.info("[CONFIG_FLOW][RELAYS_FETCH_BEGIN] source=%s", self.source)
         try:
             relays = await self._api_client.async_get_relays()
         except IntersvyazApiError as err:
             self._last_error = str(err)
             return self.async_abort(reason="relay_fetch_failed")
+        _LOGGER.info("[CONFIG_FLOW][RELAYS_FETCH_OK] count=%s", len(relays))
         if not relays:
             return self.async_abort(reason="relay_not_found")
 
@@ -292,6 +297,7 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
 
         self._selected_relay = relay
         self._buyer_id = _coerce_buyer_id(relay, self._mobile_token)
+        _LOGGER.info("[CONFIG_FLOW][CRM_AUTH_BEGIN] source=%s", self.source)
         try:
             self._api_client.set_buyer_id(self._buyer_id)
             crm = await self._api_client.async_authenticate_crm(self._buyer_id)
@@ -299,6 +305,7 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
             _LOGGER.warning("CRM авторизация не удалась: %s", err)
             return self.async_abort(reason="crm_auth_failed")
         self._crm_token_payload = dict(crm.raw)
+        _LOGGER.info("[CONFIG_FLOW][CRM_AUTH_OK] source=%s", self.source)
         return self._finish_entry(mac)
 
     def _finish_entry(self, mac: str) -> ConfigFlowResult:
@@ -342,7 +349,7 @@ class IntersvyazConfigFlow(ConfigFlow, domain=DOMAIN):
             data[CONF_RELAY_NUM] = relay.opener.relay_num
 
         _LOGGER.info(
-            "Config flow завершён: source=%s primary_video=%s",
+            "[CONFIG_FLOW][ENTRY_CREATE] source=%s primary_video=%s",
             self.source,
             relay.has_video,
         )
