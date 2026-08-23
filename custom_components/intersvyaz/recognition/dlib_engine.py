@@ -53,6 +53,25 @@ class DlibFaceRecognitionEngine(_BaseWorkerEngine):
             )
         )
 
+    def probe(self) -> None:
+        """Run worker self-test that executes both detector and ResNet code paths."""
+
+        response = self._rpc({"command": "healthcheck"})
+        if response.get("engine") != self.engine_id:
+            raise HomeAssistantError(
+                "dlib worker self-test вернул неожиданный engine id"
+            )
+        if not response.get("simd_probe_ok"):
+            raise HomeAssistantError(
+                "dlib worker не прошёл вычислительный self-test"
+            )
+        _LOGGER.info(
+            "[FACE][DLIB_PROBE_OK] engine=%s dlib_version=%s descriptor_size=%s",
+            self.engine_id,
+            response.get("dlib_version", "unknown"),
+            response.get("descriptor_size", "unknown"),
+        )
+
     def recognize(
         self,
         image_bytes: bytes,

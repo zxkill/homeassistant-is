@@ -223,6 +223,22 @@ def _recognize(request: dict[str, Any]) -> dict[str, object]:
 
 
 def _healthcheck() -> dict[str, object]:
+    """Execute real native code so unsupported SIMD fails during the probe."""
+
+    blank_detector_image = np.zeros((96, 96, 3), dtype=np.uint8)
+    _detector(blank_detector_image, 0)
+
+    # dlib supports descriptors from a pre-aligned 150x150 RGB chip. A blank
+    # chip is sufficient for a CPU compatibility self-test; the output is
+    # deliberately discarded and never used as biometric data.
+    blank_face_chip = np.zeros((150, 150, 3), dtype=np.uint8)
+    probe_descriptor = _face_encoder.compute_face_descriptor(
+        blank_face_chip,
+        0,
+    )
+    if len(probe_descriptor) != _DESCRIPTOR_SIZE:
+        raise RuntimeError("dlib ResNet self-test вернул неверный descriptor size")
+
     return {
         "engine": _ENGINE_ID,
         "descriptor_size": _DESCRIPTOR_SIZE,
@@ -231,6 +247,7 @@ def _healthcheck() -> dict[str, object]:
         "recognizer": "dlib_resnet_29",
         "dlib_version": getattr(dlib, "__version__", "unknown"),
         "models_ready": True,
+        "simd_probe_ok": True,
     }
 
 

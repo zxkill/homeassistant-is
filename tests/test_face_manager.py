@@ -6,11 +6,12 @@ def test_face_manager_requires_confirmation_streak(component_root):
     assert "blake2b" in source
 
 
-def test_face_descriptors_stay_128_compatible(component_root):
+def test_face_descriptors_stay_engine_tagged(component_root):
     source = (component_root / "face_manager.py").read_text()
     assert "len(face.encoding) == 128" in source
     assert "len(vector) == 128" in source
     assert "FACE_ENGINE_DLIB_RESNET_V1" in source
+    assert "FACE_ENGINE_PORTABLE_V1" in source
 
 
 def test_known_faces_store_home_assistant_person_mapping(component_root):
@@ -23,28 +24,39 @@ def test_known_faces_store_home_assistant_person_mapping(component_root):
     assert "hass.states.get" in identity_source
 
 
-def test_multiple_templates_per_person_are_supported(component_root):
+def test_multiple_templates_per_person_are_supported_per_engine(component_root):
     source = (component_root / "face_manager.py").read_text()
     const = (component_root / "const.py").read_text()
     assert "FACE_TEMPLATES_PER_PERSON_MAX = 5" in const
     assert "_trim_templates" in source
+    assert "engine_id" in source
     assert "identity_templates" in source
     assert "list_known_face_names" in source
-    assert "seen: set[str]" in source
 
 
-def test_old_portable_descriptors_are_never_mixed_with_dlib(component_root):
+def test_old_portable_descriptors_are_restored_for_cpu_fallback(component_root):
     source = (component_root / "face_manager.py").read_text()
-    assert "engine != FACE_ENGINE_DLIB_RESNET_V1" in source
-    assert "[FACE][MIGRATION_SKIP]" in source
-    assert "_LEGACY_PORTABLE_DEFAULT_THRESHOLD = 0.30" in source
-    assert "[FACE][MIGRATION_THRESHOLD]" in source
-    assert "FACE_RECOGNITION_DISTANCE_THRESHOLD" in source
+    assert "engine not in" in source
+    assert "FACE_ENGINE_DLIB_RESNET_V1" in source
+    assert "FACE_ENGINE_PORTABLE_V1" in source
+    assert "portable_templates" in source
+    assert "[FACE][LOAD_SKIP]" in source
 
 
-def test_first_dlib_enrollment_forces_safe_observe_mode(component_root):
+def test_backend_switch_retries_recognition_with_correct_descriptor_set(component_root):
     source = (component_root / "face_manager.py").read_text()
-    assert "force_observe_after_enroll" in source
-    assert "not self._known_faces" in source
-    assert "[FACE][MIGRATION_AUTO_OPEN_DISABLED]" in source
-    assert "new_recognition_engine_requires_observation" in source
+    assert "RecognitionBackendSwitched" in source
+    assert "_async_recognize_with_retry" in source
+    assert "for attempt in range(2)" in source
+    assert "face.engine == engine_id" in source
+    assert "[FACE][ANALYZE_RETRY]" in source
+
+
+def test_fallback_resets_threshold_and_disables_auto_open(component_root):
+    source = (component_root / "face_manager.py").read_text()
+    const = (component_root / "const.py").read_text()
+    assert "FACE_PORTABLE_DISTANCE_THRESHOLD = 0.30" in const
+    assert "_async_apply_fallback_safety" in source
+    assert "CONF_RECOGNITION_THRESHOLD] = FACE_PORTABLE_DISTANCE_THRESHOLD" in source
+    assert "RECOGNITION_MODE_AUTO_OPEN" in source
+    assert "[FACE][FALLBACK_SAFETY]" in source
