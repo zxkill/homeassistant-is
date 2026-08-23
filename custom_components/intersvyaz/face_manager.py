@@ -1,8 +1,9 @@
-"""Локальное распознавание лиц и безопасное автооткрытие домофона."""
+"""Нейросетевое распознавание лиц и безопасное автооткрытие домофона."""
 from __future__ import annotations
 
 import hashlib
 import logging
+from pathlib import Path
 import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable
@@ -24,6 +25,7 @@ from .const import (
     DEFAULT_RECOGNITION_MODE,
     DOOR_EVENT_FACE_RECOGNIZED,
     DOOR_EVENT_UNKNOWN_PERSON,
+    FACE_ENGINE_DLIB_RESNET_V1,
     FACE_ENGINE_PORTABLE_V1,
     FACE_EVENT_COOLDOWN_SECONDS,
     FACE_RECOGNITION_COOLDOWN_SECONDS,
@@ -31,6 +33,7 @@ from .const import (
     FACE_REQUIRED_MATCHES_DEFAULT,
     FACE_REQUIRED_MATCHES_MAX,
     FACE_REQUIRED_MATCHES_MIN,
+    FACE_TEMPLATES_PER_PERSON_MAX,
     RECOGNITION_MODE_AUTO_OPEN,
     RECOGNITION_MODE_OFF,
     RECOGNITION_MODES,
@@ -42,11 +45,13 @@ from .face_identity import (
     normalize_person_entity_id,
     resolve_person_name,
 )
-from .recognition import FaceRecognitionResult, PortableFaceRecognitionEngine
+from .recognition import DlibFaceRecognitionEngine, FaceRecognitionResult
+from .recognition.model_manager import FaceModelManager
 from .runtime import IntersvyazConfigEntry
 from .security import safe_door_ref
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.face_manager")
+_LEGACY_PORTABLE_DEFAULT_THRESHOLD = 0.30
 
 
 @dataclass(slots=True)
@@ -56,23 +61,38 @@ class _MatchStreak:
 
 
 class FaceRecognitionManager:
-    """Хранит базу лиц и принимает решение о распознавании/автооткрытии."""
+    """Хранит нейросетевые эталоны и принимает решение об автооткрытии."""
 
     def __init__(
         self,
         hass: HomeAssistant,
         entry: IntersvyazConfigEntry,
         *,
-        engine: PortableFaceRecognitionEngine | None = None,
+        engine: DlibFaceRecognitionEngine | None = None,
     ) -> None:
         self._hass = hass
         self._entry = entry
-        self._engine = engine or PortableFaceRecognitionEngine()
+
+        if engine is None:
+            model_dir = Path(
+                hass.config.path(".storage", "intersvyaz_face_models")
+            )
+            self._model_manager: FaceModelManager | None = FaceModelManager(
+                hass,
+                model_dir,
+            )
+            self._engine = DlibFaceRecognitionEngine(model_dir)
+        else:
+            self._model_manager = None
+            self._engine = engine
+
         self._known_faces: list[KnownFace] = []
         self._last_frame_hash: dict[str, bytes] = {}
         self._door_open_cooldown: dict[str, float] = {}
         self._event_cooldown: dict[tuple[str, str], float] = {}
         self._streaks: dict[str, _MatchStreak] = {}
+        self._legacy_descriptors_skipped = False
+        self._reset_legacy_threshold_on_store = False
 
         self._mode = DEFAULT_RECOGNITION_MODE
         self._threshold = FACE_RECOGNITION_DISTANCE_THRESHOLD
@@ -84,15 +104,23 @@ class FaceRecognitionManager:
         self.refresh_options()
 
         _LOGGER.info(
-            "[FACE][READY] entry_id=%s faces=%s linked_people=%s mode=%s threshold=%.2f "
-            "required=%s engine=%s",
+            "[FACE][READY] entry_id=%s people=%s templates=%s linked_people=%s "
+            "mode=%s threshold=%.2f required=%s engine=%s dependencies=%s",
             entry.entry_id,
+            len({face.identity_key for face in self._known_faces}),
             len(self._known_faces),
-            sum(1 for face in self._known_faces if face.person_entity_id),
+            len(
+                {
+                    face.person_entity_id
+                    for face in self._known_faces
+                    if face.person_entity_id
+                }
+            ),
             self._mode,
             self._threshold,
             self._required_matches,
             self._engine.engine_id,
+            self._engine.available,
         )
 
     @property
@@ -112,16 +140,33 @@ class FaceRecognitionManager:
         return self._required_matches
 
     def refresh_options(self) -> None:
-        """Применить options без перезагрузки интеграции."""
-
         options = self._entry.options
         mode = str(options.get(CONF_RECOGNITION_MODE, DEFAULT_RECOGNITION_MODE))
         self._mode = mode if mode in RECOGNITION_MODES else DEFAULT_RECOGNITION_MODE
+
+        threshold_value = options.get(
+            CONF_RECOGNITION_THRESHOLD,
+            FACE_RECOGNITION_DISTANCE_THRESHOLD,
+        )
+        try:
+            raw_threshold = float(threshold_value)
+        except (TypeError, ValueError):
+            raw_threshold = FACE_RECOGNITION_DISTANCE_THRESHOLD
+
+        # The 2.0.x portable descriptor used a completely different distance scale.
+        # Do not silently carry its default 0.30 into dlib ResNet.
+        if (
+            self._legacy_descriptors_skipped
+            and abs(raw_threshold - _LEGACY_PORTABLE_DEFAULT_THRESHOLD) < 0.0001
+        ):
+            raw_threshold = FACE_RECOGNITION_DISTANCE_THRESHOLD
+            self._reset_legacy_threshold_on_store = True
+
         self._threshold = _clamp_float(
-            options.get(CONF_RECOGNITION_THRESHOLD),
+            raw_threshold,
             default=FACE_RECOGNITION_DISTANCE_THRESHOLD,
-            minimum=0.10,
-            maximum=0.55,
+            minimum=0.25,
+            maximum=0.70,
         )
         self._required_matches = _clamp_int(
             options.get(CONF_RECOGNITION_REQUIRED_MATCHES),
@@ -142,39 +187,60 @@ class FaceRecognitionManager:
             maximum=300,
         )
         _LOGGER.debug(
-            "[FACE][OPTIONS] mode=%s threshold=%.2f required=%s open_cooldown=%ss event_cooldown=%ss",
+            "[FACE][OPTIONS] mode=%s threshold=%.2f required=%s "
+            "open_cooldown=%ss event_cooldown=%ss legacy_threshold_reset=%s",
             self._mode,
             self._threshold,
             self._required_matches,
             self._open_cooldown,
             self._event_cooldown_seconds,
+            self._reset_legacy_threshold_on_store,
         )
 
     def list_known_faces(self) -> list[KnownFace]:
         return list(self._known_faces)
 
     def list_known_face_names(self) -> list[str]:
-        """Сохранить старый API: вернуть отображаемые имена лиц."""
+        """Return one display name per identity, not one row per template."""
 
-        return [self.display_name(face) for face in self._known_faces]
+        seen: set[str] = set()
+        result: list[str] = []
+        for face in self._known_faces:
+            if face.identity_key in seen:
+                continue
+            seen.add(face.identity_key)
+            result.append(self.display_name(face))
+        return result
 
     def list_unlinked_faces(self) -> list[KnownFace]:
-        return [face for face in self._known_faces if not face.person_entity_id]
+        result: list[KnownFace] = []
+        seen: set[str] = set()
+        for face in self._known_faces:
+            if face.person_entity_id or face.identity_key in seen:
+                continue
+            seen.add(face.identity_key)
+            result.append(face)
+        return result
 
     def display_name(self, face: KnownFace) -> str:
-        """Получить актуальное friendly_name связанного Person, если он доступен."""
-
         return face_display_name(self._hass, face)
 
     def face_choices(self, *, only_unlinked: bool = False) -> dict[str, str]:
-        """Вернуть choices identity_key -> человекочитаемая подпись для options flow."""
-
         faces = self.list_unlinked_faces() if only_unlinked else self._known_faces
+        counts: dict[str, int] = {}
+        for face in self._known_faces:
+            counts[face.identity_key] = counts.get(face.identity_key, 0) + 1
+
         choices: dict[str, str] = {}
         for face in faces:
+            if face.identity_key in choices:
+                continue
             label = self.display_name(face)
             if face.person_entity_id:
                 label = f"{label} ({face.person_entity_id})"
+            template_count = counts.get(face.identity_key, 1)
+            if template_count > 1:
+                label = f"{label} · {template_count} templates"
             choices[face.identity_key] = label
         return choices
 
@@ -185,64 +251,88 @@ class FaceRecognitionManager:
         *,
         person_entity_id: str | None = None,
     ) -> None:
-        """Добавить/заменить лицо и при необходимости связать его с Person HA."""
+        """Add one ResNet template; up to five may belong to the same Person."""
 
         normalized_person = normalize_person_entity_id(self._hass, person_entity_id)
-        normalized_name = resolve_person_name(self._hass, normalized_person, fallback=name)
+        normalized_name = resolve_person_name(
+            self._hass,
+            normalized_person,
+            fallback=name,
+        )
         if not normalized_name:
             raise HomeAssistantError("Имя не может быть пустым")
         if not image_bytes:
             raise HomeAssistantError("Пустое изображение невозможно обработать")
+
+        await self._async_prepare_engine()
         if not self.library_available:
             raise HomeAssistantError(
-                "Локальный движок распознавания недоступен. Проверьте requirements и журнал"
+                "dlib ResNet недоступен в текущем окружении. "
+                "Проверьте установку dlib-bin и журнал Home Assistant."
             )
 
         _LOGGER.info(
-            "[FACE][ENROLL_BEGIN] entry_id=%s image_bytes=%s linked_to_person=%s",
+            "[FACE][ENROLL_BEGIN] entry_id=%s image_bytes=%s "
+            "linked_to_person=%s engine=%s",
             self._entry.entry_id,
             len(image_bytes),
             bool(normalized_person),
+            self._engine.engine_id,
+        )
+        force_observe_after_enroll = (
+            self._legacy_descriptors_skipped or not self._known_faces
         )
         encoding = await self._hass.async_add_executor_job(
-            self._engine.extract_single_encoding, image_bytes
+            self._engine.extract_single_encoding,
+            image_bytes,
         )
 
-        # Для Person Home Assistant одна личность должна иметь ровно одну активную запись.
-        # Одновременно заменяем старую legacy-запись с тем же именем, чтобы после миграции
-        # пользователь не получил два конкурирующих descriptor одного человека.
-        self._known_faces = [
-            face
-            for face in self._known_faces
-            if not (
-                (normalized_person and face.person_entity_id == normalized_person)
-                or (
+        # Drop old unlinked aliases with the same friendly name when a real Person
+        # is selected, but preserve existing dlib templates for that Person.
+        if normalized_person:
+            self._known_faces = [
+                face
+                for face in self._known_faces
+                if not (
                     not face.person_entity_id
-                    and self.display_name(face).casefold() == normalized_name.casefold()
+                    and self.display_name(face).casefold()
+                    == normalized_name.casefold()
                 )
-            )
-        ]
-        self._known_faces.append(
-            KnownFace(
-                name=normalized_name,
-                encoding=encoding,
-                engine=self._engine.engine_id,
-                person_entity_id=normalized_person,
-            )
+            ]
+
+        new_face = KnownFace(
+            name=normalized_name,
+            encoding=encoding,
+            engine=self._engine.engine_id,
+            person_entity_id=normalized_person,
         )
-        await self._async_store_faces(ensure_safe_mode=True)
+        self._known_faces.append(new_face)
+        self._trim_templates(new_face.identity_key)
+
+        await self._async_store_faces(
+            ensure_safe_mode=True,
+            force_observe=force_observe_after_enroll,
+        )
+        templates = sum(
+            1
+            for face in self._known_faces
+            if face.identity_key == new_face.identity_key
+        )
         _LOGGER.info(
-            "[FACE][ENROLL_OK] descriptor=%s total_faces=%s linked_to_person=%s",
+            "[FACE][ENROLL_OK] descriptor=%s identity_templates=%s/%s "
+            "total_templates=%s linked_to_person=%s",
             len(encoding),
+            templates,
+            FACE_TEMPLATES_PER_PERSON_MAX,
             len(self._known_faces),
             bool(normalized_person),
         )
 
     async def async_link_known_face(
-        self, identity_key: str, person_entity_id: str
+        self,
+        identity_key: str,
+        person_entity_id: str,
     ) -> None:
-        """Связать уже существующий legacy descriptor с Person Home Assistant."""
-
         face = self._find_face(identity_key)
         if face is None:
             raise HomeAssistantError("Выбранное лицо не найдено")
@@ -250,24 +340,28 @@ class FaceRecognitionManager:
         if not normalized_person:
             raise HomeAssistantError("Не выбран человек Home Assistant")
 
-        new_name = resolve_person_name(self._hass, normalized_person, fallback=face.name)
-        self._known_faces = [
-            item
-            for item in self._known_faces
-            if item is face or item.person_entity_id != normalized_person
-        ]
-        face.person_entity_id = normalized_person
-        face.name = new_name
+        old_key = face.identity_key
+        new_name = resolve_person_name(
+            self._hass,
+            normalized_person,
+            fallback=face.name,
+        )
+
+        for item in self._known_faces:
+            if item.identity_key == old_key:
+                item.person_entity_id = normalized_person
+                item.name = new_name
+
+        new_key = f"person:{normalized_person}"
+        self._trim_templates(new_key)
         await self._async_store_faces()
         _LOGGER.info(
-            "[FACE][LINK_OK] entry_id=%s linked_to_person=true total_faces=%s",
+            "[FACE][LINK_OK] entry_id=%s linked_to_person=true templates=%s",
             self._entry.entry_id,
-            len(self._known_faces),
+            sum(1 for item in self._known_faces if item.identity_key == new_key),
         )
 
     async def async_remove_known_face(self, identifier: str) -> None:
-        """Удалить лицо по identity_key, имени или person entity_id."""
-
         normalized = (identifier or "").strip()
         before = len(self._known_faces)
         self._known_faces = [
@@ -275,10 +369,15 @@ class FaceRecognitionManager:
             for face in self._known_faces
             if not self._face_matches_identifier(face, normalized)
         ]
-        if len(self._known_faces) == before:
+        removed = before - len(self._known_faces)
+        if removed <= 0:
             raise HomeAssistantError(f"Лицо '{normalized}' не найдено")
         await self._async_store_faces()
-        _LOGGER.info("[FACE][REMOVE_OK] total_faces=%s", len(self._known_faces))
+        _LOGGER.info(
+            "[FACE][REMOVE_OK] removed_templates=%s total_templates=%s",
+            removed,
+            len(self._known_faces),
+        )
 
     async def async_process_image(
         self,
@@ -286,20 +385,39 @@ class FaceRecognitionManager:
         image_bytes: bytes,
         open_callback: Callable[[], Awaitable[None]] | None,
     ) -> FaceRecognitionResult | None:
-        """Проанализировать кадр и, в режиме auto_open, безопасно открыть дверь."""
-
         if self._mode == RECOGNITION_MODE_OFF:
             return None
-        if not self.library_available or not image_bytes:
+        if not self._known_faces or not image_bytes:
+            return None
+
+        try:
+            await self._async_prepare_engine()
+        except HomeAssistantError as err:
+            _LOGGER.warning(
+                "[FACE][PREPARE_FAILED] door=%s error=%s",
+                safe_door_ref(door_uid),
+                err,
+            )
+            return None
+
+        if not self.library_available:
             return None
 
         digest = hashlib.blake2b(image_bytes, digest_size=12).digest()
         if self._last_frame_hash.get(door_uid) == digest:
-            _LOGGER.debug("Повторный идентичный кадр door=%s пропущен", safe_door_ref(door_uid))
+            _LOGGER.debug(
+                "[FACE][FRAME_SKIP] door=%s reason=identical",
+                safe_door_ref(door_uid),
+            )
             return None
         self._last_frame_hash[door_uid] = digest
 
-        known = [(face.identity_key, face.encoding) for face in self._known_faces]
+        known = [
+            (face.identity_key, face.encoding)
+            for face in self._known_faces
+            if face.engine == FACE_ENGINE_DLIB_RESNET_V1
+            and len(face.encoding) == 128
+        ]
         try:
             result = await self._hass.async_add_executor_job(
                 self._engine.recognize,
@@ -308,10 +426,17 @@ class FaceRecognitionManager:
                 self._threshold,
             )
         except HomeAssistantError as err:
-            _LOGGER.warning("Ошибка анализа кадра door=%s: %s", safe_door_ref(door_uid), err)
+            _LOGGER.warning(
+                "[FACE][ANALYZE_FAILED] door=%s error=%s",
+                safe_door_ref(door_uid),
+                err,
+            )
             return None
         except Exception:  # pragma: no cover
-            _LOGGER.exception("Неожиданная ошибка recognition door=%s", safe_door_ref(door_uid))
+            _LOGGER.exception(
+                "[FACE][ANALYZE_UNEXPECTED] door=%s",
+                safe_door_ref(door_uid),
+            )
             return None
 
         if result.faces_detected <= 0:
@@ -344,7 +469,10 @@ class FaceRecognitionManager:
             _LOGGER.warning(
                 "[FACE][MATCH_ORPHAN] door=%s identity_key_hash=%s",
                 safe_door_ref(door_uid),
-                hashlib.blake2b(result.matched_name.encode(), digest_size=5).hexdigest(),
+                hashlib.blake2b(
+                    result.matched_name.encode(),
+                    digest_size=5,
+                ).hexdigest(),
             )
             self._streaks.pop(door_uid, None)
             return result
@@ -353,7 +481,8 @@ class FaceRecognitionManager:
         streak = self._advance_streak(door_uid, matched_face.identity_key)
         should_force_confirm_event = streak == self._required_matches
         if should_force_confirm_event or self._should_emit(
-            door_uid, DOOR_EVENT_FACE_RECOGNIZED
+            door_uid,
+            DOOR_EVENT_FACE_RECOGNIZED,
         ):
             emit_door_event(
                 self._hass,
@@ -380,7 +509,7 @@ class FaceRecognitionManager:
             return result
         if streak < self._required_matches:
             _LOGGER.debug(
-                "Ожидаем подтверждение лица door=%s streak=%s/%s",
+                "[FACE][AUTO_OPEN_WAIT] door=%s streak=%s/%s",
                 safe_door_ref(door_uid),
                 streak,
                 self._required_matches,
@@ -388,20 +517,21 @@ class FaceRecognitionManager:
             return result
         if result.faces_detected != 1:
             _LOGGER.warning(
-                "Auto-open door=%s заблокирован: faces_detected=%s (требуется ровно одно лицо)",
+                "[FACE][AUTO_OPEN_BLOCK] door=%s reason=faces_detected value=%s",
                 safe_door_ref(door_uid),
                 result.faces_detected,
             )
             return result
         if not result.auto_open_safe:
             _LOGGER.warning(
-                "Auto-open door=%s заблокирован portable-движком: кандидат недостаточно надёжен",
+                "[FACE][AUTO_OPEN_BLOCK] door=%s reason=dlib_safety distance=%s",
                 safe_door_ref(door_uid),
+                f"{result.distance:.4f}" if result.distance is not None else "none",
             )
             return result
         if not callable(open_callback):
             _LOGGER.warning(
-                "Auto-open door=%s невозможен: callback отсутствует",
+                "[FACE][AUTO_OPEN_BLOCK] door=%s reason=no_callback",
                 safe_door_ref(door_uid),
             )
             return result
@@ -410,14 +540,14 @@ class FaceRecognitionManager:
         last_open = self._door_open_cooldown.get(door_uid, 0.0)
         if now - last_open < self._open_cooldown:
             _LOGGER.debug(
-                "Auto-open door=%s пропущен cooldown remaining=%.1fs",
+                "[FACE][AUTO_OPEN_COOLDOWN] door=%s remaining=%.1fs",
                 safe_door_ref(door_uid),
                 self._open_cooldown - (now - last_open),
             )
             return result
 
         _LOGGER.info(
-            "Auto-open подтверждён: door=%s streak=%s linked_person=%s",
+            "[FACE][AUTO_OPEN_CONFIRMED] door=%s streak=%s linked_person=%s",
             safe_door_ref(door_uid),
             streak,
             bool(matched_face.person_entity_id),
@@ -426,26 +556,68 @@ class FaceRecognitionManager:
             await open_callback()
         except HomeAssistantError as err:
             _LOGGER.warning(
-                "Auto-open door=%s не выполнен: %s",
+                "[FACE][AUTO_OPEN_FAILED] door=%s error=%s",
                 safe_door_ref(door_uid),
                 err,
             )
             return result
-        except Exception:  # pragma: no cover - физическое действие не ломает camera entity
+        except Exception:  # pragma: no cover
             _LOGGER.exception(
-                "Auto-open door=%s завершился неожиданной ошибкой",
+                "[FACE][AUTO_OPEN_UNEXPECTED] door=%s",
                 safe_door_ref(door_uid),
             )
             return result
+
         self._door_open_cooldown[door_uid] = time.monotonic()
         self._streaks.pop(door_uid, None)
         return result
 
     async def async_stop(self) -> None:
-        """Остановить изолированный recognition worker при выгрузке интеграции."""
-
-        _LOGGER.debug("Останавливаем face manager entry_id=%s", self._entry.entry_id)
+        _LOGGER.debug(
+            "[FACE][STOP] entry_id=%s engine=%s",
+            self._entry.entry_id,
+            self._engine.engine_id,
+        )
         await self._hass.async_add_executor_job(self._engine.close)
+
+    async def _async_prepare_engine(self) -> None:
+        if not self._engine.available:
+            raise HomeAssistantError(
+                "dlib-bin не установлен или несовместим с текущей платформой"
+            )
+        if self._model_manager is not None:
+            await self._model_manager.async_ensure_models()
+        if not bool(getattr(self._engine, "models_available", True)):
+            raise HomeAssistantError("Модели dlib ResNet не удалось подготовить")
+
+    def _trim_templates(self, identity_key: str) -> None:
+        templates = [
+            face
+            for face in self._known_faces
+            if face.identity_key == identity_key
+        ]
+        if len(templates) <= FACE_TEMPLATES_PER_PERSON_MAX:
+            return
+
+        keep_ids = {
+            id(face)
+            for face in templates[-FACE_TEMPLATES_PER_PERSON_MAX:]
+        }
+        before = len(self._known_faces)
+        self._known_faces = [
+            face
+            for face in self._known_faces
+            if face.identity_key != identity_key or id(face) in keep_ids
+        ]
+        _LOGGER.info(
+            "[FACE][TEMPLATE_TRIM] identity_hash=%s removed=%s kept=%s",
+            hashlib.blake2b(
+                identity_key.encode(),
+                digest_size=5,
+            ).hexdigest(),
+            before - len(self._known_faces),
+            FACE_TEMPLATES_PER_PERSON_MAX,
+        )
 
     def _advance_streak(self, door_uid: str, identity_key: str) -> int:
         current = self._streaks.get(door_uid)
@@ -487,28 +659,36 @@ class FaceRecognitionManager:
         for item in stored or []:
             if not isinstance(item, dict):
                 continue
+
             name = item.get(CONF_FACE_NAME)
             encoding = item.get(CONF_FACE_ENCODING)
             engine = item.get(CONF_FACE_ENGINE)
             person_entity_id = item.get(CONF_FACE_PERSON_ENTITY_ID)
+
             if not isinstance(name, str) or not isinstance(encoding, Iterable):
                 continue
-            if engine != FACE_ENGINE_PORTABLE_V1:
+
+            if engine != FACE_ENGINE_DLIB_RESNET_V1:
+                self._legacy_descriptors_skipped = True
                 previous_engine = engine or "legacy_dlib"
                 _LOGGER.warning(
-                    "Лицо '%s' пропущено: descriptor создан несовместимым движком (%s). "
-                    "После обновления до portable engine его нужно добавить заново.",
-                    name.strip() or "<без имени>",
+                    "[FACE][MIGRATION_SKIP] name_present=%s old_engine=%s "
+                    "new_engine=%s action=re_enroll_required",
+                    bool(name.strip()),
                     previous_engine,
+                    FACE_ENGINE_DLIB_RESNET_V1,
                 )
                 continue
+
             try:
                 vector = [float(value) for value in encoding]
             except (TypeError, ValueError):
                 continue
+
             normalized_person = (
                 str(person_entity_id).strip()
-                if isinstance(person_entity_id, str) and str(person_entity_id).startswith("person.")
+                if isinstance(person_entity_id, str)
+                and str(person_entity_id).startswith("person.")
                 else None
             )
             if name.strip() and len(vector) == 128:
@@ -516,33 +696,96 @@ class FaceRecognitionManager:
                     KnownFace(
                         name=name.strip(),
                         encoding=vector,
-                        engine=FACE_ENGINE_PORTABLE_V1,
+                        engine=FACE_ENGINE_DLIB_RESNET_V1,
                         person_entity_id=normalized_person,
                     )
                 )
-        _LOGGER.debug(
-            "[FACE][LOAD] faces=%s linked_people=%s legacy_unlinked=%s",
+
+        for identity_key in {
+            face.identity_key for face in self._known_faces
+        }:
+            self._trim_templates(identity_key)
+
+        _LOGGER.info(
+            "[FACE][LOAD] people=%s templates=%s linked_people=%s "
+            "legacy_skipped=%s engine=%s",
+            len({face.identity_key for face in self._known_faces}),
             len(self._known_faces),
-            sum(1 for face in self._known_faces if face.person_entity_id),
-            sum(1 for face in self._known_faces if not face.person_entity_id),
+            len(
+                {
+                    face.person_entity_id
+                    for face in self._known_faces
+                    if face.person_entity_id
+                }
+            ),
+            self._legacy_descriptors_skipped,
+            FACE_ENGINE_DLIB_RESNET_V1,
         )
 
-    async def _async_store_faces(self, *, ensure_safe_mode: bool = False) -> None:
+    async def _async_store_faces(
+        self,
+        *,
+        ensure_safe_mode: bool = False,
+        force_observe: bool = False,
+    ) -> None:
         options = dict(self._entry.options)
-        options[CONF_KNOWN_FACES] = [face.as_dict() for face in self._known_faces]
+        options[CONF_KNOWN_FACES] = [
+            face.as_dict() for face in self._known_faces
+        ]
         if ensure_safe_mode and CONF_RECOGNITION_MODE not in options:
             options[CONF_RECOGNITION_MODE] = DEFAULT_RECOGNITION_MODE
-        self._hass.config_entries.async_update_entry(self._entry, options=options)
+
+        if (
+            force_observe
+            and options.get(CONF_RECOGNITION_MODE) == RECOGNITION_MODE_AUTO_OPEN
+        ):
+            options[CONF_RECOGNITION_MODE] = DEFAULT_RECOGNITION_MODE
+            _LOGGER.warning(
+                "[FACE][MIGRATION_AUTO_OPEN_DISABLED] entry_id=%s "
+                "reason=new_recognition_engine_requires_observation",
+                self._entry.entry_id,
+            )
+
+        if self._reset_legacy_threshold_on_store:
+            options[CONF_RECOGNITION_THRESHOLD] = (
+                FACE_RECOGNITION_DISTANCE_THRESHOLD
+            )
+            self._reset_legacy_threshold_on_store = False
+            _LOGGER.info(
+                "[FACE][MIGRATION_THRESHOLD] old=%.2f new=%.2f engine=%s",
+                _LEGACY_PORTABLE_DEFAULT_THRESHOLD,
+                FACE_RECOGNITION_DISTANCE_THRESHOLD,
+                FACE_ENGINE_DLIB_RESNET_V1,
+            )
+
+        self._hass.config_entries.async_update_entry(
+            self._entry,
+            options=options,
+        )
+        self._legacy_descriptors_skipped = False
         self.refresh_options()
         _LOGGER.debug(
-            "[FACE][STORE] entry_id=%s faces=%s linked_people=%s",
+            "[FACE][STORE] entry_id=%s people=%s templates=%s linked_people=%s",
             self._entry.entry_id,
+            len({face.identity_key for face in self._known_faces}),
             len(self._known_faces),
-            sum(1 for face in self._known_faces if face.person_entity_id),
+            len(
+                {
+                    face.person_entity_id
+                    for face in self._known_faces
+                    if face.person_entity_id
+                }
+            ),
         )
 
 
-def _clamp_float(value, *, default: float, minimum: float, maximum: float) -> float:
+def _clamp_float(
+    value,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
     try:
         parsed = float(value)
     except (TypeError, ValueError):
@@ -550,7 +793,13 @@ def _clamp_float(value, *, default: float, minimum: float, maximum: float) -> fl
     return max(minimum, min(maximum, parsed))
 
 
-def _clamp_int(value, *, default: int, minimum: int, maximum: int) -> int:
+def _clamp_int(
+    value,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
     try:
         parsed = int(value)
     except (TypeError, ValueError):
