@@ -4,13 +4,17 @@ import json
 def test_manifest_is_stable_v2(component_root):
     manifest = json.loads((component_root / "manifest.json").read_text())
     assert manifest["domain"] == "intersvyaz"
-    assert manifest["version"] == "2.0.16"
+    assert manifest["version"] == "2.1.0"
     assert manifest["config_flow"] is True
     assert manifest["integration_type"] == "hub"
-    assert manifest["requirements"] == ["numpy==2.3.2"]
+    assert manifest["requirements"] == [
+        "numpy==2.3.2",
+        "dlib-bin==20.0.1",
+    ]
     assert any(item.lower().startswith("numpy") for item in manifest["requirements"])
+    assert any(item.lower().startswith("dlib-bin") for item in manifest["requirements"])
     assert not any("opencv" in item.lower() for item in manifest["requirements"])
-    assert not any("dlib" in item.lower() for item in manifest["requirements"])
+    assert not any(item.lower().startswith("dlib==") for item in manifest["requirements"])
     assert not any("face-recognition" in item.lower() for item in manifest["requirements"])
 
 
@@ -34,8 +38,6 @@ def test_translation_json(component_root):
 
 
 def test_options_menu_uses_current_translation_schema(component_root):
-    """Options menu labels must use the current HA menu_options schema."""
-
     expected = {
         "recognition_settings",
         "add_face",

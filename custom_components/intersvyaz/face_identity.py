@@ -1,4 +1,4 @@
-"""Связь локальных descriptor лиц с сущностями Person Home Assistant."""
+"""Связь локальных face embeddings с сущностями Person Home Assistant."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -11,30 +11,28 @@ from .const import (
     CONF_FACE_ENGINE,
     CONF_FACE_NAME,
     CONF_FACE_PERSON_ENTITY_ID,
-    FACE_ENGINE_PORTABLE_V1,
+    FACE_ENGINE_DLIB_RESNET_V1,
 )
 
 
 @dataclass(slots=True)
 class KnownFace:
-    """Локальный descriptor лица и необязательная ссылка на Person Home Assistant."""
+    """Один нейросетевой эталон лица и ссылка на Person Home Assistant."""
 
     name: str
     encoding: list[float] = field(default_factory=list)
-    engine: str = FACE_ENGINE_PORTABLE_V1
+    engine: str = FACE_ENGINE_DLIB_RESNET_V1
     person_entity_id: str | None = None
 
     @property
     def identity_key(self) -> str:
-        """Стабильный runtime-ключ, не зависящий от friendly_name Person."""
+        """Стабильный runtime-ключ, общий для нескольких фото одного Person."""
 
         if self.person_entity_id:
             return f"person:{self.person_entity_id}"
         return f"legacy:{self.name}"
 
     def as_dict(self) -> dict[str, object]:
-        """Сериализовать descriptor без изменения старого формата хранения."""
-
         payload: dict[str, object] = {
             CONF_FACE_NAME: self.name,
             CONF_FACE_ENCODING: list(self.encoding),
@@ -48,8 +46,6 @@ class KnownFace:
 def normalize_person_entity_id(
     hass: HomeAssistant, person_entity_id: str | None
 ) -> str | None:
-    """Проверить, что выбранная сущность существует и относится к домену person."""
-
     if person_entity_id is None:
         return None
     normalized = str(person_entity_id).strip()
@@ -68,8 +64,6 @@ def resolve_person_name(
     *,
     fallback: str,
 ) -> str:
-    """Получить актуальное friendly_name Person, сохранив fallback для legacy-записей."""
-
     if person_entity_id:
         state = hass.states.get(person_entity_id)
         if state is not None:
@@ -80,8 +74,6 @@ def resolve_person_name(
 
 
 def face_display_name(hass: HomeAssistant, face: KnownFace) -> str:
-    """Вернуть актуальное отображаемое имя лица."""
-
     return resolve_person_name(
         hass,
         face.person_entity_id,
