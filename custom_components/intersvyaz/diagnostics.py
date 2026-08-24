@@ -45,6 +45,10 @@ async def async_get_config_entry_diagnostics(
             "movement_access": camera.movement_access,
             "has_snapshot_url": bool(camera.snapshot_url),
             "has_hls_url": bool(camera.hls_url),
+            "has_low_latency_hls_url": bool(camera.low_latency_hls_url),
+            "has_mse_url": bool(camera.mse_url),
+            "has_realtime_ws_url": bool(camera.realtime_ws_url),
+            "has_realtime_source": camera.has_realtime_stream,
             "matched_to_door": bool(camera.matched_door_uid),
         }
         for camera in runtime.yard_cameras
@@ -53,11 +57,15 @@ async def async_get_config_entry_diagnostics(
     try:
         known_faces = runtime.face_manager.list_known_faces()
         known_faces_count = len(known_faces)
-        linked_people_count = sum(1 for face in known_faces if face.person_entity_id)
+        linked_people_count = sum(
+            1 for face in known_faces if face.person_entity_id
+        )
         engine_available = bool(runtime.face_manager.library_available)
         recognition_mode = runtime.face_manager.recognition_mode
     except Exception:  # pragma: no cover - diagnostics must never break HA UI
-        _LOGGER.exception("Не удалось собрать часть диагностики распознавания")
+        _LOGGER.exception(
+            "Не удалось собрать часть диагностики распознавания"
+        )
         known_faces_count = -1
         linked_people_count = -1
         engine_available = False
@@ -74,7 +82,12 @@ async def async_get_config_entry_diagnostics(
             "door_count": len(doors),
             "doors": doors,
             "yard_camera_count": len(yard_cameras),
-            "yard_live_camera_count": sum(1 for item in yard_cameras if item["live_access"]),
+            "yard_live_camera_count": sum(
+                1 for item in yard_cameras if item["live_access"]
+            ),
+            "yard_realtime_camera_count": sum(
+                1 for item in yard_cameras if item["has_realtime_source"]
+            ),
             "yard_cameras": yard_cameras,
             "known_faces_count": known_faces_count,
             "linked_people_count": linked_people_count,
@@ -86,11 +99,14 @@ async def async_get_config_entry_diagnostics(
             "snapshot_cache_entries": runtime.snapshot_manager.cache_size,
         },
     }
+
     _LOGGER.debug(
-        "Диагностика подготовлена: entry_id=%s doors=%s yard_cameras=%s faces=%s",
+        "Диагностика подготовлена: entry_id=%s doors=%s yard_cameras=%s "
+        "realtime=%s faces=%s",
         entry.entry_id,
         len(doors),
         len(yard_cameras),
+        result["runtime"]["yard_realtime_camera_count"],
         known_faces_count,
     )
     return result
