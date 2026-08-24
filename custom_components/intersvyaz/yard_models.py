@@ -22,6 +22,8 @@ class YardCameraInfo:
     hls_url: str | None
     low_latency_hls_url: str | None
     archive_hls_url: str | None
+    mse_url: str | None
+    realtime_ws_url: str | None
     latitude: float | None
     longitude: float | None
 
@@ -75,8 +77,30 @@ def _parse_camera(payload: Any) -> YardCameraInfo | None:
     snapshot_live = snapshot.get("LIVE") if isinstance(snapshot.get("LIVE"), dict) else {}
     hls = media.get("HLS") if isinstance(media.get("HLS"), dict) else {}
     hls_live = hls.get("LIVE") if isinstance(hls.get("LIVE"), dict) else {}
+
+    raw_mse = media.get("MSE")
+    if isinstance(raw_mse, dict):
+        mse_url = _media_url(raw_mse.get("LIVE"))
+    else:
+        mse_url = _media_url(raw_mse)
+
+    raw_realtime_ws = payload.get("REALTIME_WS")
+    if isinstance(raw_realtime_ws, dict):
+        realtime_ws_url = _media_url(
+            raw_realtime_ws.get("combined")
+            or raw_realtime_ws.get("COMBINED")
+            or raw_realtime_ws.get("live")
+            or raw_realtime_ws.get("LIVE")
+        )
+    else:
+        realtime_ws_url = _media_url(raw_realtime_ws)
+
     position = payload.get("POSITION") if isinstance(payload.get("POSITION"), dict) else {}
-    coordinates = payload.get("COORDINATES") if isinstance(payload.get("COORDINATES"), dict) else {}
+    coordinates = (
+        payload.get("COORDINATES")
+        if isinstance(payload.get("COORDINATES"), dict)
+        else {}
+    )
 
     return YardCameraInfo(
         camera_id=_int(payload.get("ID")),
@@ -92,9 +116,26 @@ def _parse_camera(payload: Any) -> YardCameraInfo | None:
         hls_url=_text(hls_live.get("MAIN")),
         low_latency_hls_url=_text(hls_live.get("LOW_LATENCY")),
         archive_hls_url=_text(hls.get("ARCHIVE")),
+        mse_url=mse_url,
+        realtime_ws_url=realtime_ws_url,
         latitude=_float(position.get("LATITUDE") or coordinates.get("LATITUDE")),
         longitude=_float(position.get("LONGITUDE") or coordinates.get("LONGITUDE")),
     )
+
+
+def _media_url(value: Any) -> str | None:
+    """Extract a URL from API fields that may be strings or small mappings."""
+
+    if isinstance(value, str):
+        return _text(value)
+    if not isinstance(value, dict):
+        return None
+
+    for key in ("MAIN", "main", "COMBINED", "combined", "URL", "url", "SOURCE", "source"):
+        result = _text(value.get(key))
+        if result:
+            return result
+    return None
 
 
 def _access_status(access: dict[str, Any], key: str) -> bool:

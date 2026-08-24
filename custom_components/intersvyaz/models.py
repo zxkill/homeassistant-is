@@ -82,9 +82,29 @@ class YardCameraRuntime:
     hls_url: str | None
     low_latency_hls_url: str | None
     archive_hls_url: str | None
+    mse_url: str | None
+    realtime_ws_url: str | None
     latitude: float | None
     longitude: float | None
     matched_door_uid: str | None = None
+
+    @property
+    def has_hls_stream(self) -> bool:
+        """Есть хотя бы один HLS live URL."""
+
+        return bool(self.hls_url or self.low_latency_hls_url)
+
+    @property
+    def has_realtime_stream(self) -> bool:
+        """Есть прямой MSE/Realtime WebSocket source от API."""
+
+        return bool(self.mse_url or self.realtime_ws_url)
+
+    @property
+    def has_live_stream(self) -> bool:
+        """Камера может участвовать в live-view."""
+
+        return bool(self.has_realtime_stream or self.has_hls_stream)
 
     def update_from(self, other: "YardCameraRuntime") -> None:
         """Обновить временные media URL и метаданные, сохранив identity."""
@@ -103,6 +123,8 @@ class YardCameraRuntime:
         self.hls_url = other.hls_url
         self.low_latency_hls_url = other.low_latency_hls_url
         self.archive_hls_url = other.archive_hls_url
+        self.mse_url = other.mse_url
+        self.realtime_ws_url = other.realtime_ws_url
         self.latitude = other.latitude
         self.longitude = other.longitude
         self.matched_door_uid = other.matched_door_uid

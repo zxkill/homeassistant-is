@@ -1,22 +1,28 @@
 """Обнаружение и обновление камер «Умного двора» Intersvyaz."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import re
+import time
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.event import async_track_time_interval
 
 from .api import IntersvyazApiClient, IntersvyazApiError, IntersvyazAuthError
-from .const import YARD_CAMERA_REFRESH_INTERVAL_HOURS
+from .const import (
+    YARD_CAMERA_REFRESH_INTERVAL_HOURS,
+    YARD_REALTIME_REFRESH_SECONDS,
+)
 from .models import DoorRuntime, YardCameraRuntime
 from .runtime import IntersvyazConfigEntry
-from .yard_models import YardCameraInfo, YardGroupInfo
-from .yard_stream import YardStreamResolver
 from .yard_hls_compat import YardHlsCompatProxy
+from .yard_models import YardCameraInfo, YardGroupInfo
+from .yard_realtime import build_realtime_source
+from .yard_stream import YardStreamResolver
 
 _LOGGER = logging.getLogger("custom_components.intersvyaz.yard_camera_manager")
 
@@ -38,6 +44,9 @@ class YardCameraManager:
         self._cameras: list[YardCameraRuntime] = []
         self._refresh_unsub = None
         self._reload_scheduled = False
+        self._last_media_refresh_monotonic = 0.0
+        self._realtime_refresh_lock = asyncio.Lock()
+
         session = async_get_clientsession(hass)
         self._stream_resolver = YardStreamResolver(session)
         self._hls_compat_proxy = YardHlsCompatProxy(hass, entry, session)
@@ -57,14 +66,17 @@ class YardCameraManager:
         return [
             camera
             for camera in self._cameras
-            if camera.live_access and (camera.snapshot_url or camera.hls_url)
+            if camera.live_access
+            and (camera.snapshot_url or camera.has_live_stream)
         ]
 
     async def async_setup(self) -> None:
         """Первично получить каталог камер; ошибка камер не ломает домофон."""
 
+        loaded = False
         try:
             groups = await self._api.async_get_yard_groups()
+            loaded = True
         except (IntersvyazAuthError, IntersvyazApiError) as err:
             _LOGGER.warning(
                 "[YARD_CAMERAS][SETUP_FAILED] entry_id=%s error=%s; "
@@ -75,12 +87,17 @@ class YardCameraManager:
             groups = []
 
         self._cameras = self._build_cameras(groups)
+        if loaded:
+            self._last_media_refresh_monotonic = time.monotonic()
+
         _LOGGER.info(
-            "[YARD_CAMERAS][READY] entry_id=%s groups=%s cameras=%s live=%s matched_doors=%s",
+            "[YARD_CAMERAS][READY] entry_id=%s groups=%s cameras=%s live=%s "
+            "realtime=%s matched_doors=%s",
             self._entry.entry_id,
             len(groups),
             len(self._cameras),
             len(self.live_cameras),
+            sum(1 for item in self._cameras if item.has_realtime_stream),
             sum(1 for item in self._cameras if item.matched_door_uid),
         )
 
@@ -114,7 +131,8 @@ class YardCameraManager:
             groups = await self._api.async_get_yard_groups()
         except IntersvyazAuthError as err:
             _LOGGER.warning(
-                "[YARD_CAMERAS][AUTH_FAILED] entry_id=%s error=%s; основной API продолжает работать",
+                "[YARD_CAMERAS][AUTH_FAILED] entry_id=%s error=%s; "
+                "основной API продолжает работать",
                 self._entry.entry_id,
                 err,
             )
@@ -127,9 +145,11 @@ class YardCameraManager:
             )
             return False
 
+        self._last_media_refresh_monotonic = time.monotonic()
         fresh = self._build_cameras(groups)
         old_by_uid = {camera.uid: camera for camera in self._cameras}
         fresh_by_uid = {camera.uid: camera for camera in fresh}
+
         if set(old_by_uid) != set(fresh_by_uid):
             _LOGGER.info(
                 "[YARD_CAMERAS][COMPOSITION_CHANGED] entry_id=%s old=%s new=%s; reload",
@@ -149,23 +169,79 @@ class YardCameraManager:
 
         for uid, current in old_by_uid.items():
             current.update_from(fresh_by_uid[uid])
+
         try:
             self._entry.runtime_data.snapshot_manager.invalidate()
         except (AttributeError, RuntimeError):
             pass
+
         self._stream_resolver.invalidate()
         self._hls_compat_proxy.invalidate()
         _LOGGER.debug(
-            "[YARD_CAMERAS][REFRESH_OK] entry_id=%s cameras=%s",
+            "[YARD_CAMERAS][REFRESH_OK] entry_id=%s cameras=%s realtime=%s",
             self._entry.entry_id,
             len(self._cameras),
+            sum(1 for item in self._cameras if item.has_realtime_stream),
         )
         return True
 
     def get(self, camera_uid: str) -> YardCameraRuntime | None:
-        return next((camera for camera in self._cameras if camera.uid == camera_uid), None)
+        return next(
+            (camera for camera in self._cameras if camera.uid == camera_uid),
+            None,
+        )
 
-    async def async_stream_source(self, camera_uid: str) -> str | None:
+    def realtime_stream_source(self, camera_uid: str) -> str | None:
+        """Вернуть текущий Flussonic source без сетевых запросов.
+
+        Метод нужен CameraEntity, чтобы проверить поддержку схемы у активного
+        WebRTC provider. Подписанный URL никогда не логируется.
+        """
+
+        camera = self.get(camera_uid)
+        if camera is None or not camera.live_access:
+            return None
+        return build_realtime_source(camera)
+
+    async def async_stream_source(
+        self,
+        camera_uid: str,
+        *,
+        prefer_realtime: bool = False,
+    ) -> str | None:
+        """Вернуть лучший свежий live source для конкретного режима клиента.
+
+        ``prefer_realtime`` включается только когда активный WebRTC provider
+        Home Assistant уже подтвердил поддержку ``flussonic:``. Во всех иных
+        случаях сохраняется проверенный HLS pipeline.
+        """
+
+        camera = self.get(camera_uid)
+        if camera is None or not camera.live_access:
+            return None
+
+        if prefer_realtime and camera.has_realtime_stream:
+            await self._async_refresh_realtime_if_stale(camera_uid)
+            camera = self.get(camera_uid)
+            if camera is not None and camera.live_access:
+                realtime_source = build_realtime_source(camera)
+                if realtime_source:
+                    _LOGGER.info(
+                        "[YARD_STREAM][SELECT] camera=%s mode=realtime_flussonic "
+                        "media_age=%.1fs",
+                        _safe_camera_ref(camera.uid),
+                        self._media_age_seconds(),
+                    )
+                    return realtime_source
+
+            _LOGGER.warning(
+                "[YARD_STREAM][REALTIME_FALLBACK] camera=%s reason=no_fresh_source",
+                _safe_camera_ref(camera_uid),
+            )
+
+        return await self._async_hls_stream_source(camera_uid)
+
+    async def _async_hls_stream_source(self, camera_uid: str) -> str | None:
         """Вернуть проверенный свежий HLS URL для Home Assistant stream."""
 
         camera = self.get(camera_uid)
@@ -175,44 +251,100 @@ class YardCameraManager:
         source = await self._stream_resolver.async_resolve(camera)
         if source:
             _LOGGER.info(
-                "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s mode=main",
+                "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s mode=hls_main",
                 self._entry.entry_id,
                 _safe_camera_ref(camera.uid),
             )
             return self._hls_compat_proxy.build_stream_url(camera, source)
 
-        # Токен в MEDIA URL может устареть раньше планового шестичасового refresh.
-        # Обновляем каталог один раз и повторяем probe уже с новыми URL.
+        # Токен в MEDIA URL может устареть раньше планового refresh.
         _LOGGER.info(
-            "[YARD_STREAM][REFRESH_BEFORE_RETRY] entry_id=%s",
+            "[YARD_STREAM][REFRESH_BEFORE_RETRY] entry_id=%s mode=hls",
             self._entry.entry_id,
         )
         if not await self.async_refresh():
             return None
+
         camera = self.get(camera_uid)
         if camera is None or not camera.live_access:
             return None
+
         source = await self._stream_resolver.async_resolve(camera, force=True)
         if not source:
             return None
+
         _LOGGER.info(
-            "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s mode=main refreshed=true",
+            "[YARD_STREAM][COMPAT_SOURCE] entry_id=%s camera=%s "
+            "mode=hls_main refreshed=true",
             self._entry.entry_id,
             _safe_camera_ref(camera.uid),
         )
         return self._hls_compat_proxy.build_stream_url(camera, source)
 
-    def _build_cameras(self, groups: list[YardGroupInfo]) -> list[YardCameraRuntime]:
+    async def _async_refresh_realtime_if_stale(self, camera_uid: str) -> None:
+        """Refresh signed MSE/WebSocket URLs only when a live view needs them."""
+
+        age = self._media_age_seconds()
+        if age < YARD_REALTIME_REFRESH_SECONDS:
+            return
+
+        async with self._realtime_refresh_lock:
+            age = self._media_age_seconds()
+            if age < YARD_REALTIME_REFRESH_SECONDS:
+                return
+
+            _LOGGER.info(
+                "[YARD_STREAM][REALTIME_REFRESH] entry_id=%s camera=%s "
+                "media_age=%.1fs max_age=%ss",
+                self._entry.entry_id,
+                _safe_camera_ref(camera_uid),
+                age,
+                YARD_REALTIME_REFRESH_SECONDS,
+            )
+            refreshed = await self.async_refresh()
+            if not refreshed:
+                _LOGGER.warning(
+                    "[YARD_STREAM][REALTIME_REFRESH_FAILED] entry_id=%s camera=%s",
+                    self._entry.entry_id,
+                    _safe_camera_ref(camera_uid),
+                )
+
+    def _media_age_seconds(self) -> float:
+        if self._last_media_refresh_monotonic <= 0:
+            return float("inf")
+        return max(
+            0.0,
+            time.monotonic() - self._last_media_refresh_monotonic,
+        )
+
+    def _build_cameras(
+        self,
+        groups: list[YardGroupInfo],
+    ) -> list[YardCameraRuntime]:
         result: list[YardCameraRuntime] = []
         seen: set[str] = set()
         claimed_doors: set[str] = set()
+
         for group in groups:
             for info in group.cameras:
                 if info.uuid in seen:
                     continue
                 seen.add(info.uuid)
-                result.append(self._build_camera(group, info, claimed_doors))
-        result.sort(key=lambda item: (item.group_name.lower(), _porch_sort(item.porch), item.name.lower()))
+                result.append(
+                    self._build_camera(
+                        group,
+                        info,
+                        claimed_doors,
+                    )
+                )
+
+        result.sort(
+            key=lambda item: (
+                item.group_name.lower(),
+                _porch_sort(item.porch),
+                item.name.lower(),
+            )
+        )
         return result
 
     def _build_camera(
@@ -239,6 +371,7 @@ class YardCameraManager:
                 "[YARD_CAMERAS][MATCH_NONE] porch=%s camera_only=true",
                 info.porch,
             )
+
         return YardCameraRuntime(
             uid=f"{self._entry.entry_id}_yard_{info.uuid.lower()}",
             camera_id=info.camera_id,
@@ -256,22 +389,32 @@ class YardCameraManager:
             hls_url=info.hls_url,
             low_latency_hls_url=info.low_latency_hls_url,
             archive_hls_url=info.archive_hls_url,
+            mse_url=info.mse_url,
+            realtime_ws_url=info.realtime_ws_url,
             latitude=info.latitude,
             longitude=info.longitude,
             matched_door_uid=matched.uid if matched else None,
         )
 
-    def _match_door(self, camera: YardCameraInfo) -> DoorRuntime | None:
+    def _match_door(
+        self,
+        camera: YardCameraInfo,
+    ) -> DoorRuntime | None:
         """Сопоставить camera API с relay API, не смешивая разные дома."""
 
         camera_address = _normalize_address(camera.address)
-        exact = [door for door in self._doors if _normalize_address(door.address) == camera_address]
+        exact = [
+            door
+            for door in self._doors
+            if _normalize_address(door.address) == camera_address
+        ]
         if len(exact) == 1:
             return exact[0]
 
         porch = _normalize_porch(camera.porch)
         if not porch:
             return None
+
         base = _base_address(camera.address)
         candidates = [
             door
@@ -284,18 +427,24 @@ class YardCameraManager:
 
         # Никогда не сопоставляем только по номеру подъезда: в одном аккаунте
         # могут быть домофоны разных домов с одинаковым номером подъезда.
-        # Именно такое сопоставление раньше могло «приклеить» камеру п.5 одного
-        # дома к домофону п.5 другого адреса и скрыть camera-only устройство.
         return None
 
 
 def _normalize_address(value: str | None) -> str:
-    return re.sub(r"\s+", " ", (value or "").strip().lower().replace("ё", "е"))
+    return re.sub(
+        r"\s+",
+        " ",
+        (value or "").strip().lower().replace("ё", "е"),
+    )
 
 
 def _base_address(value: str | None) -> str:
     text = _normalize_address(value)
-    return re.sub(r",?\s*(?:п\.?|подъезд)\s*\d+\s*$", "", text).rstrip(" ,")
+    return re.sub(
+        r",?\s*(?:п\.?|подъезд)\s*\d+\s*$",
+        "",
+        text,
+    ).rstrip(" ,")
 
 
 def _normalize_porch(value: object) -> str | None:
