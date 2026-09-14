@@ -47,7 +47,9 @@ def test_backend_switch_retries_recognition_with_correct_descriptor_set(componen
     source = (component_root / "face_manager.py").read_text()
     assert "RecognitionBackendSwitched" in source
     assert "_async_recognize_with_retry" in source
-    assert "for attempt in range(2)" in source
+    # 3 attempts: a single frame may need two consecutive switches in the
+    # worst case (remote -> dlib -> portable).
+    assert "for attempt in range(3)" in source
     assert "face.engine == engine_id" in source
     assert "[FACE][ANALYZE_RETRY]" in source
 

@@ -29,31 +29,39 @@ async def async_setup_entry(
     entry: IntersvyazConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Предпочесть полный каталог cams.is74.ru, сохранив relay fallback."""
+    """Создать camera entity для каждой камеры двора и каждого домофона без пары."""
 
     runtime = entry.runtime_data
-    if runtime.live_yard_cameras:
-        entities = [
-            IntersvyazYardCamera(entry, camera)
-            for camera in runtime.live_yard_cameras
-        ]
-        _LOGGER.info(
-            "[CAMERAS][SETUP] source=yard_api entry_id=%s count=%s realtime=%s",
-            entry.entry_id,
-            len(entities),
-            sum(1 for camera in runtime.live_yard_cameras if camera.has_realtime_stream),
-        )
-    else:
-        entities = [
-            IntersvyazDoorCamera(entry, door)
-            for door in runtime.doors
-            if door.has_video and door.image_url
-        ]
-        _LOGGER.info(
-            "[CAMERAS][SETUP] source=relay_fallback entry_id=%s count=%s",
-            entry.entry_id,
-            len(entities),
-        )
+    # Двор (cams.is74.ru) и обычные домофоны (relay API) — разные источники
+    # одного аккаунта, а не взаимоисключающие варианты: домофон без
+    # сопоставленной камеры двора (например, "шаренный"/дополнительный
+    # домофон с другого адреса) должен получить свою собственную camera
+    # entity, даже если для других домофонов аккаунта камеры двора есть.
+    # См. тот же union в background.py и options_flow.py.
+    yard_cameras = list(runtime.live_yard_cameras)
+    matched_door_uids = {
+        camera.matched_door_uid for camera in yard_cameras if camera.matched_door_uid
+    }
+    unmatched_doors = [
+        door
+        for door in runtime.doors
+        if door.has_video and door.image_url and door.uid not in matched_door_uids
+    ]
+
+    entities: list[Camera] = [
+        IntersvyazYardCamera(entry, camera) for camera in yard_cameras
+    ]
+    entities.extend(
+        IntersvyazDoorCamera(entry, door) for door in unmatched_doors
+    )
+
+    _LOGGER.info(
+        "[CAMERAS][SETUP] entry_id=%s yard_api_count=%s relay_count=%s realtime=%s",
+        entry.entry_id,
+        len(yard_cameras),
+        len(unmatched_doors),
+        sum(1 for camera in yard_cameras if camera.has_realtime_stream),
+    )
     async_add_entities(entities)
 
 

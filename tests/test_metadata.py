@@ -40,6 +40,7 @@ def test_translation_json(component_root):
 def test_options_menu_uses_current_translation_schema(component_root):
     expected = {
         "recognition_settings",
+        "remote_recognition",
         "add_face",
         "remove_face",
         "link_face",

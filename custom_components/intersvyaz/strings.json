@@ -72,6 +72,7 @@
         "description": "Recognition mode: {recognition_mode}\n\nKnown faces:\n{known_faces}\n{error_message}",
         "menu_options": {
           "recognition_settings": "Recognition and auto-open",
+          "remote_recognition": "Remote recognition service",
           "add_face": "Add face",
           "remove_face": "Remove face",
           "background_cameras": "Background analysis cameras",
@@ -79,6 +80,7 @@
         },
         "menu_option_descriptions": {
           "recognition_settings": "Configure recognition mode, match threshold, confirmation and safe automatic door opening.",
+          "remote_recognition": "Optionally prefer a self-hosted face_recognize_service container over the local dlib/portable engines.",
           "add_face": "Upload a photo and add a person to the local recognition database.",
           "remove_face": "Remove a previously added person and the locally stored biometric descriptor.",
           "background_cameras": "Choose intercom cameras whose snapshots will be analyzed in the background.",
@@ -101,6 +103,20 @@
           "recognition_required_matches": "How many consecutive frames must match the same person before confirmation.",
           "auto_open_cooldown_seconds": "Minimum time between automatic openings of the same intercom.",
           "face_event_cooldown_seconds": "Suppresses duplicate recognition events for this duration."
+        }
+      },
+      "remote_recognition": {
+        "title": "Remote recognition service",
+        "description": "Leave the URL empty to keep recognition fully local. When set, this self-hosted service (your own LAN, not a cloud vendor) is preferred over the local dlib engine; if it becomes unreachable, recognition automatically and temporarily falls back to the local dlib/portable engines until it recovers. Faces must be re-enrolled once after first enabling this, since the remote engine uses its own descriptor space.",
+        "data": {
+          "remote_recognition_url": "Service URL",
+          "remote_recognition_api_key": "API token",
+          "remote_recognition_timeout_seconds": "Request timeout, seconds"
+        },
+        "data_description": {
+          "remote_recognition_url": "Base URL of your face_recognize_service container, e.g. http://192.168.1.50:8000.",
+          "remote_recognition_api_key": "Bearer token expected by the service's FACE_API_TOKEN.",
+          "remote_recognition_timeout_seconds": "How long to wait for a response before falling back to the local engine."
         }
       },
       "add_face": {
@@ -151,7 +167,8 @@
     "error": {
       "add_failed": "Could not add the face. See Home Assistant logs.",
       "remove_failed": "Could not remove the face. See Home Assistant logs.",
-      "link_failed": "Could not link the face. See Home Assistant logs."
+      "link_failed": "Could not link the face. See Home Assistant logs.",
+      "remote_connection_failed": "Could not reach the remote service (check URL, API token and that the container is running)."
     }
   },
   "entity": {

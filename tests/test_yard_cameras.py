@@ -77,8 +77,15 @@ def test_camera_platform_prefers_yard_api_and_keeps_relay_fallback(component_roo
     assert "IntersvyazYardCamera" in source
     assert "stream_source" in source
     assert "CameraEntityFeature.STREAM" in source
-    assert "yard_camera_manager.async_stream_source" in source
-    assert "relay_fallback" in source
+    assert "runtime_data.yard_camera_manager" in source
+    assert "manager.async_stream_source(" in source
+    # Yard cameras and doors without a matching yard camera are unioned, not
+    # an either/or choice for the whole account (a shared/additional door on
+    # another address must still get its own IntersvyazDoorCamera even when
+    # the account has yard cameras for other doors).
+    assert "matched_door_uids" in source
+    assert "door.uid not in matched_door_uids" in source
+    assert "relay_count=%s" in source
     assert 'f"{matched_door.uid}_camera"' in source
 
 

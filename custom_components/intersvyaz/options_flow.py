@@ -6,10 +6,12 @@ from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
+from aiohttp import ClientError, ClientTimeout
 from homeassistant.components.file_upload import process_uploaded_file
 from homeassistant.config_entries import ConfigEntry, OptionsFlow, ConfigFlowResult
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import selector
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     SNAPSHOT_MAX_BYTES,
@@ -22,7 +24,11 @@ from .const import (
     CONF_RECOGNITION_MODE,
     CONF_RECOGNITION_REQUIRED_MATCHES,
     CONF_RECOGNITION_THRESHOLD,
+    CONF_REMOTE_RECOGNITION_API_KEY,
+    CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+    CONF_REMOTE_RECOGNITION_URL,
     DEFAULT_RECOGNITION_MODE,
+    DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
     FACE_EVENT_COOLDOWN_SECONDS,
     FACE_RECOGNITION_COOLDOWN_SECONDS,
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
@@ -82,7 +88,7 @@ class IntersvyazOptionsFlow(OptionsFlow):
 
         manager = self._typed_entry.runtime_data.face_manager
         names = manager.list_known_face_names()
-        menu_options = ["recognition_settings", "add_face"]
+        menu_options = ["recognition_settings", "remote_recognition", "add_face"]
         if manager.list_unlinked_faces():
             menu_options.append("link_face")
         if names:
@@ -225,6 +231,121 @@ class IntersvyazOptionsFlow(OptionsFlow):
             user_input.get(CONF_RECOGNITION_MODE),
         )
         return await self.async_step_init()
+
+    async def async_step_remote_recognition(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Настроить (или отключить) удалённый сервис распознавания лиц."""
+
+        options = self._entry.options
+        errors: dict[str, str] = {}
+        schema = vol.Schema(
+            {
+                vol.Optional(
+                    CONF_REMOTE_RECOGNITION_URL,
+                    default=str(options.get(CONF_REMOTE_RECOGNITION_URL, "")),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.URL)
+                ),
+                vol.Optional(
+                    CONF_REMOTE_RECOGNITION_API_KEY,
+                    default=str(options.get(CONF_REMOTE_RECOGNITION_API_KEY, "")),
+                ): selector.TextSelector(
+                    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+                ),
+                vol.Required(
+                    CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                    default=_bounded_float(
+                        options.get(
+                            CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                            DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                        ),
+                        default=DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                        minimum=3,
+                        maximum=120,
+                    ),
+                ): selector.NumberSelector(
+                    selector.NumberSelectorConfig(
+                        min=3,
+                        max=120,
+                        step=1,
+                        mode=selector.NumberSelectorMode.BOX,
+                        unit_of_measurement="s",
+                    )
+                ),
+            }
+        )
+
+        if user_input is not None:
+            url = str(user_input.get(CONF_REMOTE_RECOGNITION_URL, "")).strip()
+            api_key = str(user_input.get(CONF_REMOTE_RECOGNITION_API_KEY, "")).strip()
+            timeout_seconds = float(
+                user_input.get(
+                    CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                    DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                )
+            )
+
+            if url and not await self._async_check_remote_health(
+                url, api_key, timeout_seconds
+            ):
+                errors["base"] = "remote_connection_failed"
+            else:
+                new_options = dict(options)
+                new_options[CONF_REMOTE_RECOGNITION_URL] = url
+                new_options[CONF_REMOTE_RECOGNITION_API_KEY] = api_key
+                new_options[CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS] = timeout_seconds
+                self.hass.config_entries.async_update_entry(
+                    self._entry, options=new_options
+                )
+                self._typed_entry.runtime_data.face_manager.refresh_options()
+                await (
+                    self._typed_entry.runtime_data.background_processor
+                    .async_refresh_from_options()
+                )
+                _LOGGER.info(
+                    "[OPTIONS_FLOW][REMOTE_RECOGNITION_OK] entry_id=%s enabled=%s",
+                    self._entry.entry_id,
+                    bool(url),
+                )
+                return await self.async_step_init()
+
+        return self.async_show_form(
+            step_id="remote_recognition",
+            data_schema=schema,
+            errors=errors,
+        )
+
+    async def _async_check_remote_health(
+        self, url: str, api_key: str, timeout_seconds: float
+    ) -> bool:
+        """Validate connectivity + auth against the remote encoder service."""
+
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        session = async_get_clientsession(self.hass)
+        try:
+            async with session.get(
+                f"{url.rstrip('/')}/health",
+                headers=headers,
+                timeout=ClientTimeout(total=timeout_seconds),
+            ) as response:
+                if response.status != 200:
+                    _LOGGER.warning(
+                        "[OPTIONS_FLOW][REMOTE_RECOGNITION_HEALTH_FAILED] "
+                        "entry_id=%s status=%s",
+                        self._entry.entry_id,
+                        response.status,
+                    )
+                    return False
+                payload = await response.json(content_type=None)
+                return isinstance(payload, dict) and payload.get("status") == "ok"
+        except (ClientError, TimeoutError, ValueError) as err:
+            _LOGGER.warning(
+                "[OPTIONS_FLOW][REMOTE_RECOGNITION_HEALTH_FAILED] entry_id=%s error=%s",
+                self._entry.entry_id,
+                err,
+            )
+            return False
 
     async def async_step_add_face(
         self, user_input: dict[str, Any] | None = None
@@ -412,16 +533,27 @@ class IntersvyazOptionsFlow(OptionsFlow):
             for camera in runtime.live_yard_cameras
             if camera.snapshot_url
         ]
+        # Двор и обычные домофоны — разные API-источники одного и того же
+        # аккаунта, а не взаимоисключающие варианты: у аккаунта может не быть
+        # камеры двора для конкретного домофона (например, для "шаренного"/
+        # дополнительного домофона с другого адреса), даже если для других
+        # домофонов камеры двора есть. Поэтому объединяем оба списка, избегая
+        # дублирования домофона, который уже представлен своей камерой двора.
+        matched_door_uids = {
+            camera.matched_door_uid
+            for camera in yard_cameras
+            if camera.matched_door_uid
+        }
         doors = [
-            door for door in runtime.doors if door.has_video and door.image_url
+            door
+            for door in runtime.doors
+            if door.has_video and door.image_url and door.uid not in matched_door_uids
         ]
-        if yard_cameras:
-            choices = {
-                camera.uid: camera.address or camera.name or "Камера Интерсвязи"
-                for camera in yard_cameras
-            }
-        else:
-            choices = {door.uid: door.address or "Домофон" for door in doors}
+        choices: dict[str, str] = {
+            camera.uid: camera.address or camera.name or "Камера Интерсвязи"
+            for camera in yard_cameras
+        }
+        choices.update({door.uid: door.address or "Домофон" for door in doors})
         if not choices:
             self._last_error = "Нет доступных камер"
             return await self.async_step_init()

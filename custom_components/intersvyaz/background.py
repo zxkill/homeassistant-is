@@ -68,12 +68,24 @@ class DoorBackgroundProcessor:
             for camera in runtime.live_yard_cameras
             if bool(camera.snapshot_url)
         }
+        # Двор и обычные домофоны — разные API-источники одного аккаунта, а не
+        # взаимоисключающие варианты: домофон без сопоставленной камеры двора
+        # (например, "шаренный"/дополнительный домофон с другого адреса) должен
+        # оставаться доступным для опроса, даже если для других домофонов
+        # аккаунта камеры двора есть. См. тот же union в options_flow.py.
+        matched_door_uids = {
+            camera.matched_door_uid
+            for camera in yard_available.values()
+            if camera.matched_door_uid
+        }
         door_available = {
             door.uid: door
             for door in runtime.doors
-            if door.has_video and bool(door.image_url)
+            if door.has_video
+            and bool(door.image_url)
+            and door.uid not in matched_door_uids
         }
-        available_uids = set(yard_available) if yard_available else set(door_available)
+        available_uids = set(yard_available) | set(door_available)
         if not available_uids:
             self.async_stop()
             return

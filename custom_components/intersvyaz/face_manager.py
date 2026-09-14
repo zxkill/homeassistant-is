@@ -22,15 +22,21 @@ from .const import (
     CONF_RECOGNITION_MODE,
     CONF_RECOGNITION_REQUIRED_MATCHES,
     CONF_RECOGNITION_THRESHOLD,
+    CONF_REMOTE_RECOGNITION_API_KEY,
+    CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+    CONF_REMOTE_RECOGNITION_URL,
     DEFAULT_RECOGNITION_MODE,
+    DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
     DOOR_EVENT_FACE_RECOGNIZED,
     DOOR_EVENT_UNKNOWN_PERSON,
     FACE_ENGINE_DLIB_RESNET_V1,
     FACE_ENGINE_PORTABLE_V1,
+    FACE_ENGINE_REMOTE_DLIB_V1,
     FACE_EVENT_COOLDOWN_SECONDS,
     FACE_PORTABLE_DISTANCE_THRESHOLD,
     FACE_RECOGNITION_COOLDOWN_SECONDS,
     FACE_RECOGNITION_DISTANCE_THRESHOLD,
+    FACE_REMOTE_DISTANCE_THRESHOLD,
     FACE_REQUIRED_MATCHES_DEFAULT,
     FACE_REQUIRED_MATCHES_MAX,
     FACE_REQUIRED_MATCHES_MIN,
@@ -85,7 +91,7 @@ class FaceRecognitionManager:
                 hass,
                 model_dir,
             )
-            self._engine = FaceRecognitionBackendRouter(model_dir)
+            self._engine = FaceRecognitionBackendRouter(hass, model_dir)
         else:
             # Kept for tests/custom injections.
             self._model_manager = None
@@ -101,6 +107,7 @@ class FaceRecognitionManager:
         self._mode = DEFAULT_RECOGNITION_MODE
         self._portable_threshold = FACE_PORTABLE_DISTANCE_THRESHOLD
         self._dlib_threshold = FACE_RECOGNITION_DISTANCE_THRESHOLD
+        self._remote_threshold = FACE_REMOTE_DISTANCE_THRESHOLD
         self._required_matches = FACE_REQUIRED_MATCHES_DEFAULT
         self._open_cooldown = FACE_RECOGNITION_COOLDOWN_SECONDS
         self._event_cooldown_seconds = FACE_EVENT_COOLDOWN_SECONDS
@@ -180,6 +187,12 @@ class FaceRecognitionManager:
             minimum=0.25,
             maximum=0.70,
         )
+        self._remote_threshold = _clamp_float(
+            dlib_raw,
+            default=FACE_REMOTE_DISTANCE_THRESHOLD,
+            minimum=0.25,
+            maximum=0.70,
+        )
 
         self._required_matches = _clamp_int(
             options.get(CONF_RECOGNITION_REQUIRED_MATCHES),
@@ -199,6 +212,19 @@ class FaceRecognitionManager:
             minimum=1,
             maximum=300,
         )
+
+        if isinstance(self._engine, FaceRecognitionBackendRouter):
+            remote_timeout = _clamp_float(
+                options.get(CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS),
+                default=DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS,
+                minimum=3,
+                maximum=120,
+            )
+            self._engine.configure_remote(
+                options.get(CONF_REMOTE_RECOGNITION_URL),
+                options.get(CONF_REMOTE_RECOGNITION_API_KEY),
+                remote_timeout,
+            )
 
         _LOGGER.debug(
             "[FACE][OPTIONS] mode=%s backend=%s portable_threshold=%.3f "
@@ -309,7 +335,10 @@ class FaceRecognitionManager:
         )
 
         backend_after = self._engine_id()
-        if backend_after != backend_before:
+        if (
+            backend_after != backend_before
+            and backend_after == FACE_ENGINE_PORTABLE_V1
+        ):
             await self._async_apply_fallback_safety(
                 reason="dlib_failed_during_enrollment"
             )
@@ -393,7 +422,11 @@ class FaceRecognitionManager:
                 item.name = new_name
 
         new_key = f"person:{normalized_person}"
-        for engine_id in (FACE_ENGINE_DLIB_RESNET_V1, FACE_ENGINE_PORTABLE_V1):
+        for engine_id in (
+            FACE_ENGINE_DLIB_RESNET_V1,
+            FACE_ENGINE_PORTABLE_V1,
+            FACE_ENGINE_REMOTE_DLIB_V1,
+        ):
             self._trim_templates(new_key, engine_id)
 
         await self._async_store_faces()
@@ -636,6 +669,29 @@ class FaceRecognitionManager:
         """Prepare dlib if possible, otherwise transparently select portable."""
 
         if isinstance(self._engine, FaceRecognitionBackendRouter):
+            self._engine.refresh_active_backend()
+
+            if self._engine.using_remote:
+                # Opportunistically keep local dlib models ready as an instant
+                # fallback target, but deliberately skip the dlib subprocess
+                # self-test here: while remote is healthy there is no reason
+                # to risk a local SIGILL on an incompatible CPU just to warm
+                # up a path we are not using. A model-download failure must
+                # not block remote-primary recognition, so it is logged and
+                # ignored rather than raised.
+                if self._model_manager is not None:
+                    try:
+                        await self._model_manager.async_ensure_models()
+                    except HomeAssistantError as err:
+                        _LOGGER.debug(
+                            "[FACE][DLIB_PREFETCH_SKIPPED] reason=%s", err
+                        )
+                if not self._engine.available:
+                    raise HomeAssistantError(
+                        "Удалённый сервис распознавания недоступен"
+                    )
+                return
+
             if self._engine.using_dlib:
                 if not self._engine.dlib_available:
                     self._engine.activate_portable(
@@ -676,9 +732,13 @@ class FaceRecognitionManager:
         door_uid: str,
         image_bytes: bytes,
     ) -> FaceRecognitionResult | None:
-        """Retry the frame once if a native dlib failure switches backend."""
+        """Retry the frame if a backend failure switches to the next one.
 
-        for attempt in range(2):
+        Up to 3 attempts because a single frame may need two consecutive
+        switches in the worst case: remote -> dlib -> portable.
+        """
+
+        for attempt in range(3):
             engine_id = self._engine_id()
             known = [
                 (face.identity_key, face.encoding)
@@ -707,9 +767,15 @@ class FaceRecognitionManager:
                     threshold,
                 )
             except RecognitionBackendSwitched:
-                await self._async_apply_fallback_safety(
-                    reason="dlib_failed_during_recognition"
-                )
+                if self._engine_id() == FACE_ENGINE_PORTABLE_V1:
+                    # Only the portable engine is low-quality enough to
+                    # warrant forcing the threshold down and disabling
+                    # auto-open until the user re-confirms it. Landing on
+                    # dlib (e.g. after a transient remote outage) is a full
+                    # local engine and needs no safety downgrade.
+                    await self._async_apply_fallback_safety(
+                        reason="dlib_failed_during_recognition"
+                    )
                 _LOGGER.warning(
                     "[FACE][ANALYZE_RETRY] door=%s next_backend=%s",
                     safe_door_ref(door_uid),
@@ -924,6 +990,7 @@ class FaceRecognitionManager:
             if engine not in {
                 FACE_ENGINE_DLIB_RESNET_V1,
                 FACE_ENGINE_PORTABLE_V1,
+                FACE_ENGINE_REMOTE_DLIB_V1,
             }:
                 skipped += 1
                 _LOGGER.warning(
@@ -966,6 +1033,7 @@ class FaceRecognitionManager:
             for engine_id in (
                 FACE_ENGINE_DLIB_RESNET_V1,
                 FACE_ENGINE_PORTABLE_V1,
+                FACE_ENGINE_REMOTE_DLIB_V1,
             ):
                 self._trim_templates(
                     identity_key,
@@ -974,7 +1042,7 @@ class FaceRecognitionManager:
 
         _LOGGER.info(
             "[FACE][LOAD] people=%s templates=%s dlib_templates=%s "
-            "portable_templates=%s linked_people=%s skipped=%s",
+            "portable_templates=%s remote_templates=%s linked_people=%s skipped=%s",
             len(
                 {
                     face.identity_key
@@ -993,6 +1061,12 @@ class FaceRecognitionManager:
                 for face in self._known_faces
                 if face.engine
                 == FACE_ENGINE_PORTABLE_V1
+            ),
+            sum(
+                1
+                for face in self._known_faces
+                if face.engine
+                == FACE_ENGINE_REMOTE_DLIB_V1
             ),
             len(
                 {
@@ -1088,6 +1162,8 @@ class FaceRecognitionManager:
     ) -> float:
         if engine_id == FACE_ENGINE_DLIB_RESNET_V1:
             return self._dlib_threshold
+        if engine_id == FACE_ENGINE_REMOTE_DLIB_V1:
+            return self._remote_threshold
         return self._portable_threshold
 
 

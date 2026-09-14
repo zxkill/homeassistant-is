@@ -46,6 +46,7 @@ SNAPSHOT_MAX_BYTES = 12 * 1024 * 1024
 # dlib ResNet recognition
 FACE_RECOGNITION_DISTANCE_THRESHOLD = 0.52
 FACE_PORTABLE_DISTANCE_THRESHOLD = 0.30
+FACE_REMOTE_DISTANCE_THRESHOLD = 0.52
 FACE_AUTO_OPEN_DISTANCE_THRESHOLD_MAX = 0.50
 FACE_RECOGNITION_COOLDOWN_SECONDS = 30
 FACE_EVENT_COOLDOWN_SECONDS = 10
@@ -86,6 +87,10 @@ CONF_FACE_ENGINE = "face_engine"
 FACE_ENGINE_DLIB_RESNET_V1 = "dlib_resnet_v1"
 # Legacy descriptor ID retained only for safe migration from 2.0.x.
 FACE_ENGINE_PORTABLE_V1 = "portable_face_v1"
+# Encoder computed by an external face_recognize_service container; kept as a
+# distinct engine id (not numerically compatible with FACE_ENGINE_DLIB_RESNET_V1)
+# so templates must be re-enrolled once, deliberately, when a user turns this on.
+FACE_ENGINE_REMOTE_DLIB_V1 = "remote_dlib_resnet_v1"
 CONF_FACE_IMAGE = "face_image"
 CONF_BACKGROUND_CAMERAS = "background_cameras"
 CONF_RECOGNITION_MODE = "recognition_mode"
@@ -93,6 +98,10 @@ CONF_RECOGNITION_THRESHOLD = "recognition_threshold"
 CONF_RECOGNITION_REQUIRED_MATCHES = "recognition_required_matches"
 CONF_AUTO_OPEN_COOLDOWN_SECONDS = "auto_open_cooldown_seconds"
 CONF_FACE_EVENT_COOLDOWN_SECONDS = "face_event_cooldown_seconds"
+CONF_REMOTE_RECOGNITION_URL = "remote_recognition_url"
+CONF_REMOTE_RECOGNITION_API_KEY = "remote_recognition_api_key"
+CONF_REMOTE_RECOGNITION_TIMEOUT_SECONDS = "remote_recognition_timeout_seconds"
+DEFAULT_REMOTE_RECOGNITION_TIMEOUT_SECONDS = 15
 
 RECOGNITION_MODE_OFF = "off"
 RECOGNITION_MODE_OBSERVE = "observe"
