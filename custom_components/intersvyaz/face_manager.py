@@ -102,7 +102,10 @@ class FaceRecognitionManager:
         self._door_open_cooldown: dict[str, float] = {}
         self._event_cooldown: dict[tuple[str, str], float] = {}
         self._streaks: dict[str, _MatchStreak] = {}
-        self._fallback_safety_applied = False
+        # Причина, по которой автооткрытие приостановлено, пока активен
+        # portable fallback. Только в памяти: сохранённый выбор пользователя
+        # не трогаем, иначе каждый сбой remote выключает автооткрытие навсегда.
+        self._fallback_suppress_reason: str | None = None
 
         self._mode = DEFAULT_RECOGNITION_MODE
         self._portable_threshold = FACE_PORTABLE_DISTANCE_THRESHOLD
@@ -142,6 +145,31 @@ class FaceRecognitionManager:
     @property
     def recognition_mode(self) -> str:
         return self._mode
+
+    @property
+    def auto_open_suppressed_reason(self) -> str | None:
+        """Почему автооткрытие сейчас приостановлено, или None.
+
+        Действует, только пока активен portable fallback: как только
+        remote или dlib снова работают, автооткрытие возвращается само.
+        """
+
+        if self._fallback_suppress_reason is None:
+            return None
+        if self._engine_id() != FACE_ENGINE_PORTABLE_V1:
+            _LOGGER.info(
+                "[FACE][FALLBACK_SAFETY_CLEARED] entry_id=%s backend=%s",
+                self._entry.entry_id,
+                self._backend_name(),
+            )
+            self._fallback_suppress_reason = None
+            return None
+        return self._fallback_suppress_reason
+
+    def confirm_portable_auto_open(self) -> None:
+        """Пользователь явно включил автооткрытие — разрешить его и на portable."""
+
+        self._fallback_suppress_reason = None
 
     @property
     def threshold(self) -> float:
@@ -582,6 +610,16 @@ class FaceRecognitionManager:
 
         if self._mode != RECOGNITION_MODE_AUTO_OPEN:
             return result
+        suppress_reason = self.auto_open_suppressed_reason
+        if suppress_reason is not None:
+            _LOGGER.warning(
+                "[FACE][AUTO_OPEN_BLOCK] door=%s reason=portable_fallback "
+                "fallback_reason=%s backend=%s",
+                safe_door_ref(door_uid),
+                suppress_reason,
+                self._backend_name(),
+            )
+            return result
         if streak < self._required_matches:
             _LOGGER.debug(
                 "[FACE][AUTO_OPEN_WAIT] door=%s streak=%s/%s backend=%s",
@@ -801,48 +839,26 @@ class FaceRecognitionManager:
         return None
 
     async def _async_apply_fallback_safety(self, *, reason: str) -> None:
-        """Reset portable threshold and disable auto-open after backend fallback."""
+        """Приостановить автооткрытие, пока активен portable fallback.
 
-        if self._fallback_safety_applied:
+        Настройки записи не меняются: режим и порог пользователя остаются как
+        есть, а безопасные значения действуют только в памяти, пока работает
+        portable (см. auto_open_suppressed_reason и _threshold_for_engine).
+        """
+
+        if self._fallback_suppress_reason is not None:
             return
 
-        options = dict(self._entry.options)
-        changed = False
-
-        current_threshold = options.get(
-            CONF_RECOGNITION_THRESHOLD,
-            FACE_PORTABLE_DISTANCE_THRESHOLD,
-        )
-        try:
-            parsed_threshold = float(current_threshold)
-        except (TypeError, ValueError):
-            parsed_threshold = FACE_PORTABLE_DISTANCE_THRESHOLD
-
-        if abs(parsed_threshold - FACE_PORTABLE_DISTANCE_THRESHOLD) > 0.0001:
-            options[CONF_RECOGNITION_THRESHOLD] = FACE_PORTABLE_DISTANCE_THRESHOLD
-            changed = True
-
-        if options.get(CONF_RECOGNITION_MODE) == RECOGNITION_MODE_AUTO_OPEN:
-            options[CONF_RECOGNITION_MODE] = DEFAULT_RECOGNITION_MODE
-            changed = True
-
-        if changed:
-            self._hass.config_entries.async_update_entry(
-                self._entry,
-                options=options,
-            )
-
-        self._fallback_safety_applied = True
-        self.refresh_options()
+        self._fallback_suppress_reason = reason
         _LOGGER.warning(
             "[FACE][FALLBACK_SAFETY] entry_id=%s reason=%s backend=%s "
-            "threshold=%.3f mode=%s changed=%s",
+            "threshold=%.3f mode=%s auto_open_suspended=%s",
             self._entry.entry_id,
             reason,
             self._backend_name(),
             self.threshold,
             self._mode,
-            changed,
+            self._mode == RECOGNITION_MODE_AUTO_OPEN,
         )
 
     def _trim_templates(
@@ -1164,6 +1180,10 @@ class FaceRecognitionManager:
             return self._dlib_threshold
         if engine_id == FACE_ENGINE_REMOTE_DLIB_V1:
             return self._remote_threshold
+        if self._fallback_suppress_reason is not None:
+            # Общий порог в настройках подобран под remote/dlib; для portable
+            # в режиме fallback берём его безопасное значение по умолчанию.
+            return FACE_PORTABLE_DISTANCE_THRESHOLD
         return self._portable_threshold
 
 

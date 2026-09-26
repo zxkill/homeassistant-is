@@ -223,7 +223,11 @@ class IntersvyazOptionsFlow(OptionsFlow):
         new_options = dict(options)
         new_options.update(user_input)
         self.hass.config_entries.async_update_entry(self._entry, options=new_options)
-        self._typed_entry.runtime_data.face_manager.refresh_options()
+        face_manager = self._typed_entry.runtime_data.face_manager
+        face_manager.refresh_options()
+        if user_input.get(CONF_RECOGNITION_MODE) == RECOGNITION_MODE_AUTO_OPEN:
+            # Явный выбор пользователя разрешает автооткрытие и на portable.
+            face_manager.confirm_portable_auto_open()
         await self._typed_entry.runtime_data.background_processor.async_refresh_from_options()
         _LOGGER.info(
             "Recognition settings обновлены: entry_id=%s mode=%s",
