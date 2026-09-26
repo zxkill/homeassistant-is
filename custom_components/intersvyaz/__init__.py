@@ -34,6 +34,7 @@ from .const import (
     RECOGNITION_MODES,
 )
 from .coordinator import IntersvyazDataUpdateCoordinator
+from .devices import forget_hub_device, register_hub_device
 from .door_manager import DoorManager
 from .face_manager import FaceRecognitionManager
 from .runtime import IntersvyazConfigEntry, IntersvyazRuntimeData
@@ -116,6 +117,8 @@ async def async_setup_entry(
     door_manager.start_periodic_refresh()
     yard_camera_manager.start_periodic_refresh()
 
+    # Аккаунт — родитель домофонов и камер; нужен его device_id до платформ.
+    register_hub_device(hass, entry.entry_id)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     _LOGGER.info(
@@ -146,6 +149,7 @@ async def async_unload_entry(
     runtime.door_manager.stop()
     runtime.yard_camera_manager.stop()
     runtime.snapshot_manager.invalidate()
+    forget_hub_device(entry.entry_id)
     return True
 
 
