@@ -54,3 +54,18 @@ def test_options_flow_exposes_remote_recognition_step(component_root):
     assert "CONF_REMOTE_RECOGNITION_API_KEY" in source
     assert "_async_check_remote_health" in source
     assert "remote_connection_failed" in source
+
+
+def test_remote_engine_retries_stale_keepalive_connection(component_root):
+    """uvicorn closes idle keep-alive after 5 s; one stale socket is not an outage."""
+    source = (component_root / "recognition" / "remote_engine.py").read_text(encoding="utf-8")
+
+    assert "_STALE_CONNECTION_ATTEMPTS = 2" in source
+    assert "ServerDisconnectedError" in source
+    assert "def _is_stale_connection(" in source
+    # Refused connections are a real outage and must not be retried.
+    assert "not isinstance(err, ClientConnectorError)" in source
+    # FormData is single-use, so each attempt builds a fresh one.
+    assert "data=build_data() if build_data else None" in source
+    # Timeouts still fail immediately (no doubled wait).
+    assert "except asyncio.TimeoutError as err:\n                raise RemoteRecognitionUnavailable" in source

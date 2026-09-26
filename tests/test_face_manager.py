@@ -54,11 +54,29 @@ def test_backend_switch_retries_recognition_with_correct_descriptor_set(componen
     assert "[FACE][ANALYZE_RETRY]" in source
 
 
-def test_fallback_resets_threshold_and_disables_auto_open(component_root):
-    source = (component_root / "face_manager.py").read_text()
-    const = (component_root / "const.py").read_text()
+def test_fallback_suspends_auto_open_without_rewriting_options(component_root):
+    """A transient remote outage must not flip the user's saved mode to observe."""
+    source = (component_root / "face_manager.py").read_text(encoding="utf-8")
+    const = (component_root / "const.py").read_text(encoding="utf-8")
     assert "FACE_PORTABLE_DISTANCE_THRESHOLD = 0.30" in const
-    assert "_async_apply_fallback_safety" in source
-    assert "CONF_RECOGNITION_THRESHOLD] = FACE_PORTABLE_DISTANCE_THRESHOLD" in source
-    assert "RECOGNITION_MODE_AUTO_OPEN" in source
     assert "[FACE][FALLBACK_SAFETY]" in source
+
+    safety = source[
+        source.index("async def _async_apply_fallback_safety"):
+        source.index("def _trim_templates")
+    ]
+    assert "async_update_entry" not in safety
+    assert "CONF_RECOGNITION_MODE" not in safety
+    assert "self._fallback_suppress_reason = reason" in safety
+
+    # Auto-open is blocked only while portable is active and resumes by itself.
+    assert "reason=portable_fallback" in source
+    assert "self._engine_id() != FACE_ENGINE_PORTABLE_V1" in source
+    assert "[FACE][FALLBACK_SAFETY_CLEARED]" in source
+    # Portable in fallback uses its safe default threshold, in memory only.
+    assert "return FACE_PORTABLE_DISTANCE_THRESHOLD" in source
+
+
+def test_options_flow_auto_open_confirms_portable(component_root):
+    source = (component_root / "options_flow.py").read_text(encoding="utf-8")
+    assert "confirm_portable_auto_open()" in source

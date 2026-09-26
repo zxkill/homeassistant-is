@@ -12,9 +12,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Sequence
+from typing import Callable, Sequence
 
-from aiohttp import ClientError, ClientTimeout, FormData
+from aiohttp import (
+    ClientConnectionError,
+    ClientConnectorError,
+    ClientError,
+    ClientOSError,
+    ClientTimeout,
+    FormData,
+    ServerDisconnectedError,
+)
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
@@ -27,6 +35,11 @@ _LOGGER = logging.getLogger("custom_components.intersvyaz.recognition")
 _ENROLL_JITTERS = 2
 _RECOGNIZE_JITTERS = 1
 _EXTRA_CALL_TIMEOUT_MARGIN_SECONDS = 5.0
+# Общая сессия HA держит keep-alive дольше, чем сервис (uvicorn по умолчанию
+# закрывает простаивающее соединение через 5 с). Запрос в только что
+# закрытое соединение падает с ServerDisconnectedError, хотя сервис жив,
+# поэтому обрыв соединения повторяем один раз на новом соединении.
+_STALE_CONNECTION_ATTEMPTS = 2
 
 
 class RemoteRecognitionUnavailable(HomeAssistantError):
@@ -202,57 +215,66 @@ class RemoteFaceRecognitionEngine:
         image_bytes: bytes,
         extra_fields: dict[str, str],
     ) -> tuple[int, dict]:
-        if self._url is None:
-            raise RemoteRecognitionUnavailable("Удалённый сервис распознавания не настроен")
+        def build_form() -> FormData:
+            # FormData одноразовая: на повтор нужна новая.
+            form = FormData()
+            form.add_field(
+                "image",
+                image_bytes,
+                filename="frame.jpg",
+                content_type="application/octet-stream",
+            )
+            for key, value in extra_fields.items():
+                form.add_field(key, value)
+            return form
 
-        form = FormData()
-        form.add_field(
-            "image",
-            image_bytes,
-            filename="frame.jpg",
-            content_type="application/octet-stream",
-        )
-        for key, value in extra_fields.items():
-            form.add_field(key, value)
-
-        try:
-            session = async_get_clientsession(self._hass)
-            async with session.post(
-                f"{self._url}{path}",
-                data=form,
-                headers=self._headers(),
-                timeout=ClientTimeout(total=self._timeout_seconds),
-            ) as response:
-                return response.status, await _safe_json(response)
-        except asyncio.TimeoutError as err:
-            raise RemoteRecognitionUnavailable(
-                f"Удалённый сервис распознавания не ответил за {self._timeout_seconds:.0f}с"
-            ) from err
-        except ClientError as err:
-            raise RemoteRecognitionUnavailable(
-                f"Удалённый сервис распознавания недоступен: {err}"
-            ) from err
+        return await self._async_request("POST", path, build_form)
 
     async def _async_get(self, path: str) -> tuple[int, dict]:
+        return await self._async_request("GET", path, None)
+
+    async def _async_request(
+        self,
+        method: str,
+        path: str,
+        build_data: Callable[[], FormData] | None,
+    ) -> tuple[int, dict]:
         if self._url is None:
             raise RemoteRecognitionUnavailable("Удалённый сервис распознавания не настроен")
 
-        try:
-            session = async_get_clientsession(self._hass)
-            async with session.get(
-                f"{self._url}{path}",
-                headers=self._headers(),
-                timeout=ClientTimeout(total=self._timeout_seconds),
-            ) as response:
-                return response.status, await _safe_json(response)
-        except asyncio.TimeoutError as err:
-            raise RemoteRecognitionUnavailable(
-                f"Удалённый сервис распознавания не ответил за {self._timeout_seconds:.0f}с"
-            ) from err
-        except ClientError as err:
-            raise RemoteRecognitionUnavailable(
-                f"Удалённый сервис распознавания недоступен: {err}"
-            ) from err
+        session = async_get_clientsession(self._hass)
+        for attempt in range(1, _STALE_CONNECTION_ATTEMPTS + 1):
+            try:
+                async with session.request(
+                    method,
+                    f"{self._url}{path}",
+                    data=build_data() if build_data else None,
+                    headers=self._headers(),
+                    timeout=ClientTimeout(total=self._timeout_seconds),
+                ) as response:
+                    return response.status, await _safe_json(response)
+            except asyncio.TimeoutError as err:
+                raise RemoteRecognitionUnavailable(
+                    f"Удалённый сервис распознавания не ответил за {self._timeout_seconds:.0f}с"
+                ) from err
+            except (ServerDisconnectedError, ClientConnectionError) as err:
+                if attempt < _STALE_CONNECTION_ATTEMPTS and _is_stale_connection(err):
+                    _LOGGER.debug(
+                        "[FACE][REMOTE_RETRY_STALE] path=%s attempt=%s error=%r",
+                        path,
+                        attempt,
+                        err,
+                    )
+                    continue
+                raise RemoteRecognitionUnavailable(
+                    f"Удалённый сервис распознавания недоступен: {err}"
+                ) from err
+            except ClientError as err:
+                raise RemoteRecognitionUnavailable(
+                    f"Удалённый сервис распознавания недоступен: {err}"
+                ) from err
+
+        raise RemoteRecognitionUnavailable("Удалённый сервис распознавания недоступен")
 
     def _headers(self) -> dict[str, str]:
         if self._api_key:
@@ -272,6 +294,14 @@ class RemoteFaceRecognitionEngine:
             raise HomeAssistantError(
                 f"Удалённый сервис распознавания отклонил запрос (HTTP {status})"
             )
+
+
+def _is_stale_connection(err: ClientConnectionError) -> bool:
+    """Обрыв уже открытого keep-alive соединения, а не отказ в подключении."""
+
+    if isinstance(err, ServerDisconnectedError):
+        return True
+    return isinstance(err, ClientOSError) and not isinstance(err, ClientConnectorError)
 
 
 def _best_match(
